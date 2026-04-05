@@ -1,0 +1,19 @@
+# Building PyInstaller
+build/
+dist/
+*.spec
+
+# Screenshots
+*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Playwright & Browser
+user_data/
+test-results/
+/ms-playwright/
