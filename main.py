@@ -18,6 +18,11 @@ import os
 import time
 from datetime import datetime
 
+# force Playwright (in the compiled .exe) to search for browsers in the global folder
+if getattr(sys, 'frozen', False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+    _local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(_local_appdata, "ms-playwright")
+
 try:
     from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
     try:
@@ -208,9 +213,37 @@ def launch_browser_with_debug(port: int) -> subprocess.Popen:
         if i % 3 == 2:
             log_step(f"Waiting for {browser_name} to start... ({i+1}s)")
 
-    log_error(f"{browser_name} started but port {port} is not responding.")
-    log_step("Try closing ALL browser windows first, then run the script again.")
-    sys.exit(1)
+    print()
+    log_error(f"{browser_name} is running, but port {port} is not responding.")
+    log_info("This usually happens because the browser is ALREADY open in normal mode.")
+    log_info(f"We can safely restart {browser_name} for you (all your tabs will be restored).")
+    
+    confirm = input(f"  {C_BOLD}[?]{C_RESET} Do you want to automatically restart {browser_name}? (y/n) [y]: ").strip().lower()
+    
+    if confirm not in ("n", "no"):
+        log_info(f"Closing existing {browser_name} processes...")
+        exe_name = os.path.basename(exe_path)
+        subprocess.run(["taskkill", "/F", "/IM", exe_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)  # Give processes a moment to fully terminate
+        
+        log_info(f"Relaunching {browser_name} with debug port...")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+        )
+        for i in range(15):
+            if is_port_open(port):
+                log_info(f"{browser_name} successfully restarted! (port {port})")
+                return proc
+            time.sleep(1)
+            
+        log_error(f"Still failed to open port {port} after restart.")
+        sys.exit(1)
+    else:
+        log_error("Cannot continue without debugging port. Exiting.")
+        sys.exit(1)
 
 
 
@@ -918,22 +951,28 @@ Modes:
             # Check for open tabs
             all_pages = await _get_live_pages(browser)
 
-            if not all_pages:
-                # Fresh browser — open pages for the user
-                log_info("No tabs open yet. Opening answer key and test pages...")
+            has_answers = any("cheatnetwork" in (p.url.lower() if p.url else "") for p in all_pages)
+            has_wayground = any("wayground" in (p.url.lower() if p.url else "") for p in all_pages)
+
+            if not has_answers or not has_wayground:
+                log_info("Necessary tabs not found. Opening them for you...")
                 ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page_answers = await ctx.new_page()
-                await page_answers.goto(args.answers_url, wait_until="domcontentloaded")
-                page_test = await ctx.new_page()
-                await page_test.goto("https://wayground.com", wait_until="domcontentloaded")
+                
+                if not has_answers:
+                    page_answers = await ctx.new_page()
+                    await page_answers.goto(args.answers_url, wait_until="domcontentloaded")
+                
+                if not has_wayground:
+                    page_test = await ctx.new_page()
+                    await page_test.goto("https://wayground.com", wait_until="domcontentloaded")
 
                 print()
                 print(f"{C_YELLOW}{'─'*60}{C_RESET}")
                 print(f"{C_BOLD}{C_YELLOW}⏸  LOG IN & NAVIGATE{C_RESET}")
                 print(f"{C_YELLOW}{'─'*60}{C_RESET}")
-                print(f"  1️⃣   Log in to Wayground in the browser")
-                print(f"  2️⃣   Navigate to: {C_CYAN}{args.test_url}{C_RESET}")
-                print(f"  3️⃣   Come back here and press Enter")
+                print(f"  1.   Log in to Wayground in the browser")
+                print(f"  2.   Navigate to your test URL")
+                print(f"  3.   Come back here and press Enter")
                 print(f"{C_YELLOW}{'─'*60}{C_RESET}")
                 print()
 
@@ -941,15 +980,15 @@ Modes:
                     None, input, "  ▶  Press ENTER when ready..."
                 )
                 print()
-            else:
-                # Tabs exist — let user pick with confirmation
-                page_answers, page_test = await pick_both_tabs(browser, "cheatnetwork", "wayground")
 
-                if page_answers is None:
-                    log_error("No open tabs available!")
-                    sys.exit(1)
+            # Now that tabs are definitely open, let user pick them
+            page_answers, page_test = await pick_both_tabs(browser, "cheatnetwork", "wayground")
 
-                print()
+            if page_answers is None:
+                log_error("No open tabs available!")
+                sys.exit(1)
+
+            print()
 
             # Scrape & automate
             await _run_phases(page_answers, page_test, args)
@@ -1029,10 +1068,10 @@ Modes:
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
             print(f"{C_BOLD}{C_YELLOW}⏸  MANUAL LOGIN REQUIRED{C_RESET}")
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
-            print(f"  1️⃣   In the {C_CYAN}Wayground{C_RESET} browser window — log in to your account.")
-            print(f"  2️⃣   Navigate to your test URL:")
+            print(f"  1.   In the {C_CYAN}Wayground{C_RESET} browser window — log in to your account.")
+            print(f"  2.   Navigate to your test URL:")
             print(f"       {C_CYAN}{args.test_url}{C_RESET}")
-            print(f"  3️⃣   Once you see the test/waiting screen — come back here.")
+            print(f"  3.   Once you see the test/waiting screen — come back here.")
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
             print()
 

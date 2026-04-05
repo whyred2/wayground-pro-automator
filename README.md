@@ -91,13 +91,13 @@ Connects to your Edge/Chrome instance. Logins and cookies persist between runs.
 python main.py --attach
 ```
 
-| Advantage                                          |
-| -------------------------------------------------- |
-| ✅ Preserves logins — no need to re-authenticate    |
-| ✅ Browser stays open after completion               |
-| ✅ Script can be re-run multiple times               |
-| ✅ Auto-detects Edge/Chrome executable               |
-| ✅ Interactive tab selection with confirmation        |
+| Advantage                                        |
+| ------------------------------------------------ |
+| ✅ Preserves logins — no need to re-authenticate |
+| ✅ Browser stays open after completion           |
+| ✅ Script can be re-run multiple times           |
+| ✅ Auto-detects Edge/Chrome executable           |
+| ✅ Interactive tab selection with confirmation   |
 
 > **First run:** Close all Edge windows. The script will relaunch Edge with the debug port. You may need to log in once.
 >
@@ -117,13 +117,13 @@ python main.py --test-url "https://wayground.com/join?gc=XXXXXX"
 
 ### CLI Parameters
 
-| Parameter           | Description                                    | Default                                    |
-| ------------------- | ---------------------------------------------- | ------------------------------------------ |
-| `--attach`          | Attach to Edge/Chrome (auto-launch if needed)  | `False`                                    |
-| `--wrong N`         | Number of intentionally wrong answers          | `0`                                        |
-| `--test-url URL`    | URL of the test page                           | `https://wayground.com`                    |
-| `--answers-url URL` | URL of the answer key page                     | `https://cheatnetwork.eu/services/quizizz` |
-| `--port N`          | CDP port for `--attach` mode                   | `9222`                                     |
+| Parameter           | Description                                   | Default                                    |
+| ------------------- | --------------------------------------------- | ------------------------------------------ |
+| `--attach`          | Attach to Edge/Chrome (auto-launch if needed) | `False`                                    |
+| `--wrong N`         | Number of intentionally wrong answers         | `0`                                        |
+| `--test-url URL`    | URL of the test page                          | `https://wayground.com`                    |
+| `--answers-url URL` | URL of the answer key page                    | `https://cheatnetwork.eu/services/quizizz` |
+| `--port N`          | CDP port for `--attach` mode                  | `9222`                                     |
 
 #### Examples
 
@@ -170,19 +170,19 @@ python main.py --attach --port 9333
 
 #### Thinking Time Reference
 
-| Question Length     | Approximate Delay |
-| ------------------- | ----------------- |
-| Short (~30 chars)   | 8–10 sec          |
-| Medium (~80 chars)  | 9–15 sec          |
-| Long (~200 chars)   | 13–24 sec         |
+| Question Length    | Approximate Delay |
+| ------------------ | ----------------- |
+| Short (~30 chars)  | 8–10 sec          |
+| Medium (~80 chars) | 9–15 sec          |
+| Long (~200 chars)  | 13–24 sec         |
 
 ### Question Types
 
-| Type                  | Behavior                                                                     |
-| --------------------- | ---------------------------------------------------------------------------- |
-| **Single choice**     | Clicks one correct answer → auto-advances                                    |
-| **Multi-select (MSQ)**| Clicks all correct answers with delays → clicks **Submit** button            |
-| **Intentional wrong** | `--wrong N` randomly distributes N wrong answers; for MSQ — picks a wrong option |
+| Type                   | Behavior                                                                         |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| **Single choice**      | Clicks one correct answer → auto-advances                                        |
+| **Multi-select (MSQ)** | Clicks all correct answers with delays → clicks **Submit** button                |
+| **Intentional wrong**  | `--wrong N` randomly distributes N wrong answers; for MSQ — picks a wrong option |
 
 ### Configuration
 
@@ -226,6 +226,7 @@ CLICK_DELAY_MS = 300        # Post-click delay (ms)
 **Cause:** A tab was closed while the script was running.
 
 **Solution:** Do not close tabs during automation. Restart the script.
+
 </details>
 
 <details>
@@ -247,7 +248,7 @@ CLICK_DELAY_MS = 300        # Post-click delay (ms)
 ### Содержание
 
 - [Возможности](#возможности)
-- [Установка](#установка-1)
+- [Установка](#установка)
 - [Быстрый старт](#быстрый-старт)
 - [Режимы работы](#режимы-работы)
 - [Параметры запуска](#параметры-запуска)
@@ -318,13 +319,13 @@ python main.py --attach
 python main.py --attach
 ```
 
-| Преимущество                                            |
-| ------------------------------------------------------- |
-| ✅ Сохраняет логины — не нужно входить каждый раз        |
-| ✅ Браузер не закрывается после завершения                |
-| ✅ Можно перезапускать скрипт многократно                 |
-| ✅ Автоматически находит Edge/Chrome на диске             |
-| ✅ Интерактивный выбор вкладок с подтверждением           |
+| Преимущество                                      |
+| ------------------------------------------------- |
+| ✅ Сохраняет логины — не нужно входить каждый раз |
+| ✅ Браузер не закрывается после завершения        |
+| ✅ Можно перезапускать скрипт многократно         |
+| ✅ Автоматически находит Edge/Chrome на диске     |
+| ✅ Интерактивный выбор вкладок с подтверждением   |
 
 > **Первый запуск:** Закройте все окна Edge. Скрипт перезапустит Edge с debug-портом. Возможно, потребуется войти в аккаунт один раз.
 >
@@ -344,13 +345,13 @@ python main.py --test-url "https://wayground.com/join?gc=XXXXXX"
 
 ### Параметры запуска
 
-| Параметр            | Описание                                           | По умолчанию                               |
-| ------------------- | -------------------------------------------------- | ------------------------------------------ |
+| Параметр            | Описание                                            | По умолчанию                               |
+| ------------------- | --------------------------------------------------- | ------------------------------------------ |
 | `--attach`          | Подключиться к Edge/Chrome (авто-запуск при необх.) | `False`                                    |
 | `--wrong N`         | Количество намеренно неправильных ответов           | `0`                                        |
-| `--test-url URL`    | URL страницы теста                                 | `https://wayground.com`                    |
-| `--answers-url URL` | URL страницы с ответами                            | `https://cheatnetwork.eu/services/quizizz` |
-| `--port N`          | CDP-порт для режима `--attach`                     | `9222`                                     |
+| `--test-url URL`    | URL страницы теста                                  | `https://wayground.com`                    |
+| `--answers-url URL` | URL страницы с ответами                             | `https://cheatnetwork.eu/services/quizizz` |
+| `--port N`          | CDP-порт для режима `--attach`                      | `9222`                                     |
 
 #### Примеры
 
@@ -405,11 +406,11 @@ python main.py --attach --port 9333
 
 ### Типы вопросов
 
-| Тип                        | Поведение                                                                              |
-| -------------------------- | -------------------------------------------------------------------------------------- |
-| **Одиночный выбор**        | Кликает один правильный вариант → автопереход                                          |
-| **Множественный выбор (MSQ)** | Кликает все правильные варианты с паузами → нажимает кнопку **«Отправить»**          |
-| **Намеренные ошибки**      | `--wrong N` случайно распределяет N ошибок; для MSQ — выбирает неправильный вариант    |
+| Тип                           | Поведение                                                                           |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| **Одиночный выбор**           | Кликает один правильный вариант → автопереход                                       |
+| **Множественный выбор (MSQ)** | Кликает все правильные варианты с паузами → нажимает кнопку **«Отправить»**         |
+| **Намеренные ошибки**         | `--wrong N` случайно распределяет N ошибок; для MSQ — выбирает неправильный вариант |
 
 ### Настройка
 
@@ -453,6 +454,7 @@ CLICK_DELAY_MS = 300        # Задержка после клика (мс)
 **Причина:** Вкладка была закрыта во время работы скрипта.
 
 **Решение:** Не закрывайте вкладки во время автоматизации. Перезапустите скрипт.
+
 </details>
 
 <details>
@@ -473,6 +475,7 @@ CLICK_DELAY_MS = 300        # Задержка после клика (мс)
 **Причина:** MSQ-вопрос, но кнопка «Отправить» не обнаружена.
 
 **Решение:** Проверьте селектор `SEL_SUBMIT_BUTTON` — структура страницы могла измениться.
+
 </details>
 
 ---
