@@ -17,6 +17,13 @@ import subprocess
 import os
 import time
 from datetime import datetime
+import urllib.request
+import json
+import re
+import html
+
+# Suppress Node.js deprecation warnings (DEP0169 from Playwright internals)
+os.environ["NODE_OPTIONS"] = "--no-deprecation"
 
 # force Playwright (in the compiled .exe) to search for browsers in the global folder
 if getattr(sys, 'frozen', False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
@@ -88,6 +95,50 @@ C_DIM = "\033[2m"
 
 # ─── Logging ───────────────────────────────────────────────────
 
+VERSION = "2.0"
+
+def clear_screen():
+    """Clear the terminal screen."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def print_banner(subtitle: str = ""):
+    """Print the app banner, optionally with a subtitle/status line."""
+    print(f"""
+{C_CYAN}╔══════════════════════════════════════════════╗
+║        Wayground Pro Automator   v{VERSION}        ║
+╚══════════════════════════════════════════════╝{C_RESET}""")
+    if subtitle:
+        print(f"  {C_DIM}{subtitle}{C_RESET}")
+        print()
+
+class Spinner:
+    """Simple async spinner for waiting states."""
+    _FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    
+    def __init__(self, message: str):
+        self.message = message
+        self._task = None
+        self._stop = False
+    
+    async def _spin(self):
+        i = 0
+        while not self._stop:
+            frame = self._FRAMES[i % len(self._FRAMES)]
+            print(f"\r  {C_CYAN}{frame}{C_RESET} {self.message}", end="", flush=True)
+            i += 1
+            await asyncio.sleep(0.1)
+        print(f"\r  {C_GREEN}✓{C_RESET} {self.message}" + " " * 10)
+    
+    async def __aenter__(self):
+        self._stop = False
+        self._task = asyncio.create_task(self._spin())
+        return self
+    
+    async def __aexit__(self, *_):
+        self._stop = True
+        if self._task:
+            await self._task
+
 def log_info(msg: str):
     print(f"{C_CYAN}[INFO]{C_RESET} {msg}")
 
@@ -106,7 +157,7 @@ def log_progress(current: int, total: int, msg: str = ""):
 
 
 def log_error(msg: str):
-    print(f"{C_RED}{C_BOLD}[CRITICAL ERROR]{C_RESET} {C_RED}{msg}{C_RESET}")
+    print(f"{C_RED}{C_BOLD}[ERROR]{C_RESET} {C_RED}{msg}{C_RESET}")
 
 
 def log_step(msg: str):
@@ -114,6 +165,14 @@ def log_step(msg: str):
 
 def log_wrong(msg: str):
     print(f"{C_RED}[WRONG]{C_RESET} {C_YELLOW}{msg}{C_RESET}")
+
+def print_phase_header(phase_num: int, title: str):
+    """Print a clean phase separator."""
+    print()
+    print(f"{C_CYAN}{'━'*60}{C_RESET}")
+    print(f"  {C_BOLD}{C_CYAN}PHASE {phase_num}{C_RESET}  {title}")
+    print(f"{C_CYAN}{'━'*60}{C_RESET}")
+    print()
 
 
 # ─── Human-like Thinking Delay ─────────────────────────────────
@@ -246,6 +305,113 @@ def launch_browser_with_debug(port: int) -> subprocess.Popen:
         sys.exit(1)
 
 
+# ─── API: Wayground Direct ──────────────────────────────────────
+
+_quiz_id_event = asyncio.Event()
+_captured_quiz_id = None
+
+async def intercept_response(response):
+    """Network listener to catch Wayground's /join response and extract quiz _id."""
+    global _captured_quiz_id
+    if _quiz_id_event.is_set():
+        return  # Already found — stop processing
+    
+    # Check if this might be our target API
+    if "join" in (response.url or "") and response.request.method in ["POST", "GET"] and response.status == 200:
+        try:
+            body = await response.json()
+            # Recursively find _id in quizInfo
+            def find_id(d):
+                if isinstance(d, dict):
+                    if "quizInfo" in d and isinstance(d["quizInfo"], dict) and "_id" in d["quizInfo"]:
+                        return d["quizInfo"]["_id"]
+                    for v in d.values():
+                        res = find_id(v)
+                        if res: return res
+                elif isinstance(d, list):
+                    for item in d:
+                        res = find_id(item)
+                        if res: return res
+                return None
+                
+            quiz_id = find_id(body)
+            if quiz_id:
+                # We only log on true success to avoid spamming the console 
+                # before the user even presses Enter.
+                print()  # Ensure we start on a new line (input() has no trailing \n)
+                log_info(f"✅ Extracted quiz_id: {quiz_id}")
+                _captured_quiz_id = quiz_id
+                _quiz_id_event.set()
+        except Exception:
+            pass
+
+def fetch_api_answers(quiz_id: str) -> dict[str, list[str]]:
+    """
+    Fetch raw quiz data from Wayground API and compile answers_db.
+    """
+    url = f"https://wayground.com/_quizserver/main/v2/quiz/{quiz_id}?convertQuestions=false&includeFsFeatures=true&sanitize=read&questionMetadata=true&includeUserHydratedVariants=true"
+    
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    })
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status != 200:
+                raise Exception(f"HTTP {response.status}")
+            data = json.loads(response.read().decode())
+    except Exception as e:
+        raise Exception(f"API fetch failed: {e}")
+        
+    quiz_data = data.get("data", {}).get("quiz", {})
+    info_data = quiz_data.get("info", {})
+    if not info_data:
+        raise Exception("Invalid API response format (missing 'info')")
+        
+    answers_db = {}
+    
+    questions = info_data.get("questions", [])
+    for q in questions:
+        q_struct = q.get("structure", {})
+        q_text_raw = q_struct.get("query", {}).get("text", "")
+        if q_text_raw is None:
+            continue
+        q_text = html.unescape(re.sub('<[^<]+?>', '', q_text_raw)).strip()
+        
+        options_raw = q_struct.get("options", [])
+        
+        ans_raw = q_struct.get("answer")
+        ans_indices = []
+        if isinstance(ans_raw, int):
+            ans_indices = [ans_raw]
+        elif isinstance(ans_raw, list):
+            ans_indices = ans_raw
+            
+        correct_texts = []
+        for idx in ans_indices:
+            try:
+                idx = int(idx)
+            except ValueError:
+                continue
+                
+            if 0 <= idx < len(options_raw):
+                opt = options_raw[idx]
+                opt_text_raw = opt.get("text", "")
+                if opt_text_raw is not None:
+                    opt_text = html.unescape(re.sub('<[^<]+?>', '', opt_text_raw)).strip()
+                    if opt_text:
+                        correct_texts.append(opt_text)
+                    
+        if q_text and correct_texts:
+            if q_text not in answers_db:
+                answers_db[q_text] = []
+            for text in correct_texts:
+                if text not in answers_db[q_text]:
+                    answers_db[q_text].append(text)
+            
+    return answers_db
+
 
 # ─── Scraping: CheatNetwork Answer Keys ───────────────────────
 
@@ -315,8 +481,13 @@ async def scrape_answers(page) -> dict[str, list[str]]:
             log_step(f"Q{i+1}: ⚠ No answer found for: \"{q_text[:60]}...\"")
             continue
 
-        # Store ALL answers for the question
-        answers[q_text] = a_texts
+        # Store ALL answers for the question (accumulate to handle duplicate text across variations)
+        if q_text not in answers:
+            answers[q_text] = []
+        for text in a_texts:
+            if text not in answers[q_text]:
+                answers[q_text].append(text)
+                
         if len(a_texts) > 1:
             log_step(f"Q{i+1} [MSQ {len(a_texts)} answers]: \"{q_text[:45]}...\" → {a_texts}")
         else:
@@ -558,10 +729,21 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
         correct_answers = find_answers(question_text, answers_db)
 
         if correct_answers is None:
-            log_error(f"Match not found for Q: \"{question_text}\"")
-            await test_page.screenshot(path="error_debug.png")
-            log_info("Screenshot saved as error_debug.png")
-            sys.exit(1)
+            log_step(f"{C_YELLOW}[SKIP] No match for: \"{question_text[:50]}...\" — guessing randomly{C_RESET}")
+            # Pick a random option instead of crashing
+            buttons = await test_page.query_selector_all(SEL_OPTION_BUTTON)
+            if buttons:
+                random_btn = random.choice(buttons)
+                random_text = await _get_btn_text(random_btn, SEL_OPTION_TEXT)
+                log_step(f"Guessing: \"{random_text}\"")
+                await asyncio.sleep(calc_think_time(question_text))
+                await highlight_answer(test_page, random_btn)
+                await asyncio.sleep(0.4)
+                await random_btn.click()
+                await asyncio.sleep(CLICK_DELAY_MS / 1000)
+                await clear_highlights(test_page)
+                await asyncio.sleep(1)
+            continue
 
         # ── Detect MSQ mode ──
         is_msq = await test_page.query_selector("button.option.is-msq") is not None
@@ -585,15 +767,18 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
                 wrong_buttons.append((btn, btn_text))
 
         if not correct_buttons:
-            log_error(f"No matching button found for answers: {correct_answers}")
-            log_error(f"Question was: \"{question_text}\"")
-            # Log available options for debugging
-            for btn in buttons:
-                t = await _get_btn_text(btn, SEL_OPTION_TEXT)
-                log_step(f"  Available option: \"{t}\"")
-            await test_page.screenshot(path="error_debug.png")
-            log_info("Screenshot saved as error_debug.png")
-            sys.exit(1)
+            log_step(f"{C_YELLOW}[SKIP] Answer options changed or not found — guessing randomly{C_RESET}")
+            if buttons:
+                random_btn = random.choice(buttons)
+                random_text = await _get_btn_text(random_btn, SEL_OPTION_TEXT)
+                log_step(f"Guessing: \"{random_text}\"")
+                await highlight_answer(test_page, random_btn)
+                await asyncio.sleep(0.4)
+                await random_btn.click()
+                await asyncio.sleep(CLICK_DELAY_MS / 1000)
+                await clear_highlights(test_page)
+                await asyncio.sleep(1)
+            continue
 
         # ─────────────────────────────────────────────────
         # MSQ: Multi-Select Question
@@ -893,15 +1078,11 @@ Modes:
     )
     args = parser.parse_args()
 
-    print(f"""
-{C_CYAN}╔══════════════════════════════════════════════╗
-║        Wayground Pro Automator   v1.0        ║
-╚══════════════════════════════════════════════╝{C_RESET}
-    """)
+    print_banner()
 
     # Interactive setup if no arguments were provided
     if len(sys.argv) == 1:
-        print(f"{C_CYAN}Interactive Setup (no arguments provided){C_RESET}")
+        print(f"{C_CYAN}Interactive Setup{C_RESET}")
         print(f"{C_DIM}{'─'*60}{C_RESET}")
         
         print(f"  {C_BOLD}Select Mode:{C_RESET}")
@@ -923,6 +1104,10 @@ Modes:
             
         print(f"{C_DIM}{'─'*60}{C_RESET}\n")
 
+    # Clear screen before the main work begins
+    clear_screen()
+    print_banner("Connecting..." if args.attach else "Launching browser...")
+
     async with async_playwright() as p:
 
         # ═══════════════════════════════════════════════════
@@ -942,6 +1127,9 @@ Modes:
 
             try:
                 browser = await p.chromium.connect_over_cdp(cdp_url)
+                # ── Attach network listener for API Data ──
+                for ctx in browser.contexts:
+                    ctx.on("response", intercept_response)
             except Exception as e:
                 log_error(f"Could not connect on port {port}!")
                 print(f"  {C_DIM}Error: {e}{C_RESET}")
@@ -957,6 +1145,12 @@ Modes:
             if not has_answers or not has_wayground:
                 log_info("Necessary tabs not found. Opening them for you...")
                 ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+                
+                # Make sure the listener is attached to this context
+                try:
+                    ctx.on("response", intercept_response)
+                except Exception:
+                    pass
                 
                 if not has_answers:
                     page_answers = await ctx.new_page()
@@ -994,7 +1188,7 @@ Modes:
             await _run_phases(page_answers, page_test, args)
 
             print()
-            log_info("Done! 🎉 (Browser left open — use --attach again for the next test)")
+            log_info("Done! 🎉  (Browser left open — use --attach again for the next test)")
 
         # ═══════════════════════════════════════════════════
         #  MODE: Normal (launch new Playwright browser)
@@ -1055,6 +1249,7 @@ Modes:
                 viewport={"width": 1280, "height": 900},
                 user_agent=UA,
             )
+            ctx_test.on("response", intercept_response)
             page_test = await ctx_test.new_page()
             await apply_stealth(page_test)
 
@@ -1095,12 +1290,67 @@ Modes:
 async def _run_phases(page_answers, page_test, args):
     """Shared logic: scrape answers, print table, run automation."""
 
-    log_info("=" * 50)
-    log_info("PHASE 1: Scraping answer keys...")
-    log_info("=" * 50)
-    answers_db = await scrape_answers(page_answers)
+    # ── Clear screen for Phase 1 ──
+    clear_screen()
+    print_banner("Working...")
+    print_phase_header(1, "Retrieving answer keys")
+    
+    answers_db = None
+    answer_source = "Unknown"
+    
+    # Check if we intercepted the quiz ID via network or if we can extract it right now
+    if not _quiz_id_event.is_set():
+        # Try DOM extraction as a quick fallback
+        try:
+            quiz_id_eval = await page_test.evaluate("""
+                () => {
+                    if (window.quizId) return window.quizId;
+                    const html = document.documentElement.innerHTML;
+                    const idx = html.indexOf('"quizInfo"');
+                    if (idx !== -1) {
+                        const sub = html.substring(idx, idx + 2000);
+                        const m = sub.match(/"_id"\\s*:\\s*"([a-fA-F0-9]{24})"/);
+                        if (m) return m[1];
+                    }
+                    return null;
+                }
+            """)
+            if quiz_id_eval:
+                log_info(f"✅ Extracted quiz_id from page DOM: {quiz_id_eval}")
+                global _captured_quiz_id
+                _captured_quiz_id = quiz_id_eval
+                _quiz_id_event.set()
+        except Exception:
+            pass
 
-    print(f"\n{C_CYAN}{'#':<4} {'Question':<55} {'Answer(s)':<35}{C_RESET}")
+    # Wait up to 5 seconds for the network interceptor
+    if not _quiz_id_event.is_set():
+        async with Spinner("Waiting for quiz data from network..."):
+            try:
+                await asyncio.wait_for(_quiz_id_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+
+    if _captured_quiz_id:
+        log_info(f"Quiz ID: {_captured_quiz_id}")
+        async with Spinner("Fetching answers via Direct API..."):
+            try:
+                answers_db = await asyncio.get_event_loop().run_in_executor(
+                    None, fetch_api_answers, _captured_quiz_id
+                )
+                answer_source = "Direct API"
+            except Exception as e:
+                log_error(f"Direct API failed: {e}")
+                answers_db = None
+        if answers_db:
+            log_info(f"✅ Loaded {len(answers_db)} answers from API")
+
+    if not answers_db:
+        log_step(f"{C_YELLOW}Falling back to CheatNetwork scraping...{C_RESET}")
+        answers_db = await scrape_answers(page_answers)
+        answer_source = "CheatNetwork"
+
+    print(f"\n{C_CYAN}{'#':<4} {'Question':<55} {'Answer(s)':<35}{C_RESET}  {C_DIM}[Source: {answer_source}]{C_RESET}")
     print(f"{C_DIM}{'─'*4} {'─'*55} {'─'*35}{C_RESET}")
     for i, (q, answers_list) in enumerate(answers_db.items()):
         q_short = q[:52] + "..." if len(q) > 52 else q
@@ -1113,15 +1363,13 @@ async def _run_phases(page_answers, page_test, args):
         print(f"{C_DIM}{i+1:<4}{C_RESET} {q_short:<55} {C_GREEN}{a_short:<35}{C_RESET}")
     print()
 
-    log_info("=" * 50)
-    log_info("PHASE 2: Automating test...")
-    log_info("=" * 50)
+    # ── Phase 2 ──\n    print_phase_header(2, \"Automating test\")
     await automate_test(page_test, answers_db, wrong_count=args.wrong)
 
     # ── Phase 3: Scrape results ──
-    log_info("=" * 50)
-    log_info("PHASE 3: Reading results from Wayground...")
-    log_info("=" * 50)
+    clear_screen()
+    print_banner("Finishing up...")
+    print_phase_header(3, "Reading results from Wayground")
     await scrape_results(page_test, timeout=30)
 
 
@@ -1133,7 +1381,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print(f"\n{C_RED}[INFO] Automation stopped by user.{C_RESET}")
     except Exception as e:
-        pass # Unhandled exceptions will print their own traceback
+        log_error(f"Unexpected error: {e}")
     finally:
         # Prevents the console window from instantly closing on fatal errors or when finished
         print()
