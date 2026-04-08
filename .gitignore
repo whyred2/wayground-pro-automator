@@ -4,7 +4,7 @@ dist/
 *.spec
 
 # Screenshots
-*.png
+error_debug*.png
 
 # Python
 __pycache__/
