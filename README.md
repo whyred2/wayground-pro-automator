@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="assets/logo.png" alt="Wayground Pro Automator Logo" width="100" height="100">
+</p>
+
+<p align="center">
   <h1 align="center">🚀 Wayground Pro Automator v2.0</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Direct API Interception & CheatNetwork Fallback
@@ -31,7 +35,7 @@
 ### Features
 
 - **Hybrid Answer Engine (v2.0)** — Intercepts the Wayground API in the background for 100% accurate answers instantly. If that fails, auto-falls back to scraping `cheatnetwork.eu`.
-- **Smart Image-Variant Handling** — Automatically groups answers for graphically distinct questions with identical text to maximize accuracy. 
+- **Smart Image-Variant Handling** — Automatically groups answers for graphically distinct questions with identical text to maximize accuracy.
 - **Graceful Fallbacks** — If a question's options change entirely, the script intelligently selects a random choice instead of crashing.
 - **Dual-mode operation** — Launch a new browser or attach to your existing Edge/Chrome session (preserves logins).
 - **Human-like behavior** — Dynamic "thinking" delays based on character count, randomized click logic, and jitter ±30%.
@@ -41,9 +45,11 @@
 ### Installation
 
 #### Option 1: Using the Standalone `.exe` (Easy)
+
 If you have the compiled `WaygroundAutomator.exe`, no installation is required! Just double click it or run it from CMD.
 
 #### Option 2: Running from Python Source
+
 **Prerequisites:** Python 3.10+, pip
 
 ```powershell
@@ -60,11 +66,13 @@ The most convenient way to use the tool is interactive `--attach` mode (Option 1
 
 ```powershell
 # Close ALL Edge windows first (required on first run only), then:
-python main.py
+python src/main.py
 ```
-*(Or just run the `.exe` file)*
+
+_(Or just run the `.exe` file)_
 
 **What happens:**
+
 1. Select Mode `1` (Attach).
 2. The script auto-detects `msedge.exe` and launches it with a debug port.
 3. It opens Wayground.
@@ -84,22 +92,26 @@ You can skip the interactive menu by providing arguments directly:
 | `--answers-url URL` | URL of the answer key page (for fallback)     | `https://cheatnetwork.eu/services/quizizz` |
 
 **Examples:**
+
 ```powershell
 # Interactive menu
-python main.py
+python src/main.py
 
 # Auto-start attach mode with 5 intentionally wrong answers
-python main.py --attach --wrong 5
+python src/main.py --attach --wrong 5
 ```
 
 ### How It Works
 
 #### Phase 1: Retrieving Answer Keys
-The script attaches a stealth listener to the browser's network layer. When you join the test, it instantly extracts the secret `quiz_id` from the hidden `/join` payload. It then queries the direct Wayground REST API for a 100% exact copy of the correct answers. 
-*If you refresh the page or network interception fails, it gracefully falls back to scraping CheatNetwork visually.*
+
+The script attaches a stealth listener to the browser's network layer. When you join the test, it instantly extracts the secret `quiz_id` from the hidden `/join` payload. It then queries the direct Wayground REST API for a 100% exact copy of the correct answers.
+_If you refresh the page or network interception fails, it gracefully falls back to scraping CheatNetwork visually._
 
 #### Phase 2: Test Automation
+
 The script reads the screen and matches the prompt.
+
 1. Computes a human-like read time (`min 8s + 0.05s/char`).
 2. Highlights the screen elements being processed.
 3. Solves Single-Select and Multi-Select (MSQ) questions.
@@ -131,9 +143,11 @@ The script reads the screen and matches the prompt.
 ### Установка
 
 #### Способ 1: Использование `.exe` (Самый простой)
+
 Если у вас есть скомпилированный `WaygroundAutomator.exe`, установка не требуется! Просто запустите его.
 
 #### Способ 2: Запуск из исходников Python
+
 **Требования:** Python 3.10+, pip
 
 ```powershell
@@ -150,11 +164,13 @@ python -m playwright install chromium
 
 ```powershell
 # Закройте ВСЕ окна Edge (обязательно при первом запуске), затем запустите:
-python main.py
+python src/main.py
 ```
-*(Или просто откройте файл `.exe`)*
+
+_(Или просто откройте файл `.exe`)_
 
 **Что произойдёт:**
+
 1. Выберите режим `1` (Attach).
 2. Скрипт найдёт ваш `msedge.exe` и запустит его с портом для автотестирования.
 3. В браузере откроется Wayground.
@@ -166,23 +182,26 @@ python main.py
 
 Можно пропустить интерактивное меню, передав аргументы:
 
-| Параметр            | Описание                                          |
-| ------------------- | ------------------------------------------------- |
-| `--attach`          | Подключиться к Edge/Chrome напрямую               |
-| `--wrong N`         | Сделать N специальных ошибок                      |
+| Параметр    | Описание                            |
+| ----------- | ----------------------------------- |
+| `--attach`  | Подключиться к Edge/Chrome напрямую |
+| `--wrong N` | Сделать N специальных ошибок        |
 
 **Примеры:**
+
 ```powershell
 # Запуск с 6 специальными ошибками, чтобы результат был ~94% (при 100 вопросах)
-python main.py --attach --wrong 6
+python src/main.py --attach --wrong 6
 ```
 
 ### Как это работает
 
 #### Выгрузка правильных ответов (Phase 1)
+
 Скрипт мониторит вкладку "Network" (Сеть) вашего браузера через протокол отладки. Во время входа в тест ловится скрытый запрос `/join`, из которого достаётся ID теста. Затем напрямую из закрытого API вытаскиваются все правильные ответы. Если запрос упущен, скрипт автоматически откроет вкладку CheatNetwork и спарсит ответы оттуда.
 
 #### Решение (Phase 2)
+
 1. Вычисляет время на чтение человеком (`минимум 8 сек + 0.05 сек на символ`).
 2. Отыскивает правильную кнопку. При совпадении текстов (у задач с картинками) фильтрует несуществующие кнопки.
 3. В случае `--wrong` специально кликает на неправильный ответ N раз за весь тест.
@@ -194,6 +213,7 @@ python main.py --attach --wrong 6
 
 **Причина:** Ваш Edge работает в фоне и мешает подключиться к порту отладки.
 **Решение:** Нажмите `Ctrl+Shift+Esc` (Диспетчер задач) и завершите все процессы `msedge.exe`. Затем запустите программу снова.
+
 </details>
 
 <details>
@@ -201,6 +221,7 @@ python main.py --attach --wrong 6
 
 **Причина:** Кнопки на экране не совпадают ни с одним ответом из базы (например, вопрос содержит сложное форматирование).
 **Решение:** Программа автоматически отработает эту исключительную ситуацию (угадает случайный ответ вместо того, чтобы зависнуть или "упасть"). Ничего делать не нужно!
+
 </details>
 
 <p align="center">
