@@ -23,6 +23,20 @@ except ImportError:
     PlaywrightTimeout = Exception
 
 
+async def _safe_click(btn, description: str = "") -> bool:
+    """Try to click a button; return True on success, False if element is stale/detached."""
+    try:
+        await btn.click()
+        return True
+    except Exception as exc:
+        msg = str(exc)
+        if "not attached" in msg or "detached" in msg or "stale" in msg:
+            label = f" ({description})" if description else ""
+            log_step(f"⚠ Element became stale{label} (user clicked first?). Skipping to next question...")
+            return False
+        raise  # re-raise unexpected errors
+
+
 # ─── Human-like Thinking Delay ─────────────────────────────────
 
 def calc_think_time(question_text: str) -> float:
@@ -136,11 +150,14 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
         log_info(f"Adjusted to {wrong_count} wrong answers.")
 
     # Pre-select which question numbers will be answered wrong
+    # (will be lazily re-computed once we know the real start position)
+    _wrong_indices_initialized = False
     if wrong_count > 0:
         wrong_indices = set(random.sample(range(1, total + 1), wrong_count))
         log_info(f"🎲 Will deliberately answer {wrong_count} questions wrong (not 100%)")
     else:
         wrong_indices = set()
+        _wrong_indices_initialized = True  # nothing to re-compute
 
     log_info(f"Starting automation: {total} questions (from test page), {len(answers_db)} answers loaded.")
     if wrong_count > 0:
@@ -198,8 +215,19 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
         log_step(f"⏱ Thinking for {think_time}s...")
         await asyncio.sleep(think_time)
 
+        # ── Lazy re-computation of wrong_indices when resuming mid-test ──
+        if not _wrong_indices_initialized:
+            _wrong_indices_initialized = True
+            if page_current > 1 and wrong_count > 0:
+                remaining = total - page_current + 1
+                actual_wrong = min(wrong_count, remaining)
+                wrong_indices = set(random.sample(
+                    range(page_current, page_current + remaining), actual_wrong
+                ))
+                log_info(f"🎲 Resumed at Q{page_current}: re-sampled {actual_wrong} wrong from remaining {remaining} questions")
+
         # ── Decide: answer correctly or deliberately wrong? ──
-        deliberate_wrong = answered in wrong_indices
+        deliberate_wrong = display_num in wrong_indices
 
         # ── Find correct answer(s) from DB ──
         correct_answers = find_answers(question_text, answers_db)
@@ -215,7 +243,8 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
                 await asyncio.sleep(calc_think_time(question_text))
                 await highlight_answer(test_page, random_btn)
                 await asyncio.sleep(0.4)
-                await random_btn.click()
+                if not await _safe_click(random_btn, "random guess"):
+                    continue
                 await asyncio.sleep(CLICK_DELAY_MS / 1000)
                 await clear_highlights(test_page)
                 await asyncio.sleep(1)
@@ -250,7 +279,8 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
                 log_step(f"Guessing: \"{random_text}\"")
                 await highlight_answer(test_page, random_btn)
                 await asyncio.sleep(0.4)
-                await random_btn.click()
+                if not await _safe_click(random_btn, "random guess (options changed)"):
+                    continue
                 await asyncio.sleep(CLICK_DELAY_MS / 1000)
                 await clear_highlights(test_page)
                 await asyncio.sleep(1)
@@ -287,20 +317,22 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
                 await highlight_answer(test_page, btn)
                 await asyncio.sleep(random.uniform(0.4, 0.8))
                 log_step(f"  Selecting [{i+1}/{len(targets)}]: \"{btn_text}\"")
-                await btn.click()
+                if not await _safe_click(btn, f"MSQ option '{btn_text}'"):
+                    break
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
-            # Click the Submit button
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-            submit_btn = await test_page.query_selector(SEL_SUBMIT_BUTTON)
-            if submit_btn:
-                log_step("Clicking Submit (Отправить)...")
-                await submit_btn.click()
             else:
-                log_error("Submit button not found!")
-                await test_page.screenshot(path="error_debug.png")
-                import sys
-                sys.exit(1)
+                # Click the Submit button
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                submit_btn = await test_page.query_selector(SEL_SUBMIT_BUTTON)
+                if submit_btn:
+                    log_step("Clicking Submit (Отправить)...")
+                    if not await _safe_click(submit_btn, "MSQ submit"):
+                        continue
+                else:
+                    log_error("Submit button not found!")
+                    await test_page.screenshot(path="error_debug.png")
+                    continue
 
         # ─────────────────────────────────────────────────
         # Single-answer question
@@ -319,7 +351,8 @@ async def automate_test(test_page, answers_db: dict[str, list[str]], wrong_count
             await asyncio.sleep(0.8)
 
             log_step(f"Clicking: \"{target_text}\"")
-            await target_btn.click()
+            if not await _safe_click(target_btn, f"answer '{target_text}'"):
+                continue
 
         # Post-click delay
         await asyncio.sleep(CLICK_DELAY_MS / 1000)

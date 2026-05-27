@@ -93,6 +93,12 @@ Modes:
         default=CDP_PORT,
         help=f"CDP port for --attach mode (default: {CDP_PORT})"
     )
+    parser.add_argument(
+        "-q", "--quiz-input",
+        type=str,
+        default=None,
+        help="Quiz URL or game PIN code to use for answer extraction."
+    )
     args = parser.parse_args()
 
     print_banner()
@@ -110,7 +116,15 @@ Modes:
             None, input, "  Enter choice [default: 1]: "
         )
         args.attach = (mode.strip() == '2')
-            
+        
+        print()
+        print(f"  {C_BOLD}Quiz URL or game code:{C_RESET}")
+        print(f"  {C_DIM}Example: https://wayground.com/join?gc=XXXXXX or XXXXXX{C_RESET}")
+        quiz_input_raw = await asyncio.get_event_loop().run_in_executor(
+            None, input, f"  Enter URL or code (or press Enter to skip): "
+        )
+        args.quiz_input = quiz_input_raw.strip() if quiz_input_raw.strip() else None
+
         print(f"{C_DIM}{'─'*60}{C_RESET}\n")
 
     # Clear screen before the main work begins
@@ -246,16 +260,25 @@ Modes:
             page_test = await ctx_test.new_page()
             await apply_stealth(page_test)
 
-            log_info("Opening Wayground login page...")
-            await page_test.goto("https://wayground.com", wait_until="domcontentloaded")
+            # Determine initial test URL based on user input
+            target_test_url = args.test_url
+            if args.quiz_input:
+                inp = args.quiz_input.strip()
+                if inp.isdigit():
+                    target_test_url = f"https://wayground.com/join?gc={inp}"
+                elif "wayground.com" in inp:
+                    target_test_url = inp
+
+            log_info(f"Opening: {target_test_url}...")
+            await page_test.goto(target_test_url, wait_until="domcontentloaded")
 
             print()
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
             print(f"{C_BOLD}{C_YELLOW}⏸  MANUAL LOGIN REQUIRED{C_RESET}")
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
             print(f"  1.   In the {C_CYAN}Wayground{C_RESET} browser window — log in to your account.")
-            print(f"  2.   Navigate to your test URL:")
-            print(f"       {C_CYAN}{args.test_url}{C_RESET}")
+            print(f"  2.   Navigate to your test URL (if not redirected):")
+            print(f"       {C_CYAN}{target_test_url}{C_RESET}")
             print(f"  3.   Once you see the test/waiting screen — come back here.")
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
             print()
@@ -354,14 +377,62 @@ async def _run_phases(page_test, browser, args):
             await apply_stealth(page_answers)
         except Exception:
             pass  # stealth is nice-to-have, not critical
-        await page_answers.goto(args.answers_url, wait_until="domcontentloaded")
+        # Build quiz input for CheatNetwork form
+        # Priority: user-provided URL/code > test page URL
+        quiz_input_str = args.quiz_input
+        if not quiz_input_str:
+            # Try to extract from the current test page URL
+            test_url = page_test.url
+            if "wayground" in test_url or "quizizz" in test_url:
+                quiz_input_str = test_url
         
-        answers_db = await scrape_answers(page_answers)
-        answer_source = "CheatNetwork"
+        target_cn_url = args.answers_url
+        if quiz_input_str and "cheatnetwork.eu/services/quizizz/answers" in quiz_input_str:
+            target_cn_url = quiz_input_str
+
+        await page_answers.goto(target_cn_url, wait_until="domcontentloaded")
         
-        # Close the CheatNetwork tab — no longer needed
-        log_info("Closing CheatNetwork tab...")
-        await page_answers.close()
+        # Attempt 1: Auto-fill the CheatNetwork form
+        answers_db = await scrape_answers(page_answers, quiz_input=quiz_input_str)
+        
+        if answers_db:
+            answer_source = "CheatNetwork"
+            log_info("Closing CheatNetwork tab...")
+            await page_answers.close()
+        else:
+            # Attempt 2: Let the user manually interact with CheatNetwork
+            log_info(f"{C_YELLOW}Auto-scraping failed. Switching to manual mode...{C_RESET}")
+            print()
+            print(f"{C_YELLOW}{'─'*60}{C_RESET}")
+            print(f"{C_BOLD}{C_YELLOW}⏸  MANUAL CHEATNETWORK MODE{C_RESET}")
+            print(f"{C_YELLOW}{'─'*60}{C_RESET}")
+            print(f"  The CheatNetwork tab is open in the browser.")
+            print(f"  1.  Go to the {C_CYAN}CheatNetwork{C_RESET} tab")
+            print(f"  2.  Enter your quiz link or game PIN")
+            print(f"  3.  Click {C_BOLD}\"Get Answers\"{C_RESET}")
+            print(f"  4.  Wait for the answers to appear")
+            print(f"  5.  Come back here and press {C_BOLD}Enter{C_RESET}")
+            print(f"{C_YELLOW}{'─'*60}{C_RESET}")
+            print()
+            
+            await asyncio.get_event_loop().run_in_executor(
+                None, input, "  ▶  Press ENTER when answers are visible on CheatNetwork..."
+            )
+            print()
+            
+            # Try scraping again (without auto-fill — user already filled the form)
+            answers_db = await scrape_answers(page_answers, quiz_input=None)
+            
+            if answers_db:
+                answer_source = "CheatNetwork (manual)"
+            
+            log_info("Closing CheatNetwork tab...")
+            await page_answers.close()
+        
+        if not answers_db:
+            log_error("Could not retrieve answers from any source.")
+            log_error("Please check your quiz link/PIN and try again.")
+            sys.exit(1)
 
     print(f"\n{C_CYAN}{'#':<4} {'Question':<55} {'Answer(s)':<35}{C_RESET}  {C_DIM}[Source: {answer_source}]{C_RESET}")
     print(f"{C_DIM}{'─'*4} {'─'*55} {'─'*35}{C_RESET}")

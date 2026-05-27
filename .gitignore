@@ -17,3 +17,6 @@ venv/
 user_data/
 test-results/
 /ms-playwright/
+
+# Other
+*.html

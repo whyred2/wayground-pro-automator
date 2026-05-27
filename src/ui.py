@@ -7,7 +7,7 @@ import asyncio
 
 from config import C_RESET, C_GREEN, C_RED, C_YELLOW, C_CYAN, C_BOLD, C_DIM
 
-VERSION = "2.1"
+VERSION = "2.2"
 
 
 def clear_screen():

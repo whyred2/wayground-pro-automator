@@ -11,6 +11,10 @@ SEL_QUESTION_BOX = ".question-box"
 SEL_QUESTION_TEXT = "p.font-semibold.text-gray-200"
 SEL_ANSWER_TEXT = "ul li span"
 
+# ─── Selectors — CheatNetwork Form ────────────────────────────
+SEL_CN_INPUT = 'input[placeholder="Enter game pin or link"]'
+SEL_CN_SUBMIT = 'button[type="submit"]'
+
 # ─── Selectors — Test Page (Wayground) ────────────────────────
 SEL_CURRENT_QUESTION = "#questionText"
 SEL_CURRENT_QUESTION_INNER = ".content-slot p"

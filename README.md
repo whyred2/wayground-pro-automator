@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v2.1</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v2.2</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Direct API Interception & Lazy CheatNetwork Fallback
     <br />
@@ -25,7 +25,7 @@
 
 ### Table of Contents
 
-- [What's New in v2.1](#whats-new-in-v21)
+- [What's New in v2.2](#whats-new-in-v22)
 - [Features](#features)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
@@ -33,12 +33,13 @@
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
 
-### What's New in v2.1
+### What's New in v2.2
 
-- **Lazy CheatNetwork Fallback** — The CheatNetwork tab is no longer opened at startup. It only opens on-demand if the Direct API fails, and closes automatically after scraping.
-- **Smart Wrong-Answer Prompt** — The `--wrong N` setting is now asked _after_ answers are loaded, so you can see the total number of questions before deciding.
-- **Modular Codebase** — The monolithic `main.py` (~1400 lines) has been split into 9 focused modules for better maintainability and readability.
-- **New Default Mode** — "New standalone browser" is now the recommended default (Option 1). Attach mode is still available as Option 2.
+- **Automation Resilience (Stale/Detached DOMs)** — Added a safe click wrapper. If you manually click an option in the browser before the script does, it gracefully continues without crashing.
+- **Mid-Test Resume Support** — Resuming a quiz mid-way (e.g. from question 10) now works perfectly. The script lazily re-samples deliberate wrong indices and uses the real page question counter.
+- **CheatNetwork Login Modal Handler** — Automatically detects "Not logged in" / "Access denied" modals on CheatNetwork, navigates back to the form, and retries up to 3 times (with zero reloads to prevent IP blocks).
+- **Auto-Redirection** — If a PIN code or quiz URL is provided at startup, the Wayground browser automatically navigates to it, eliminating manual copying.
+- **CLI Quiz Input** — Target URL/PIN can now be passed via the command line using `-q / --quiz-input`.
 
 ### Features
 
@@ -146,7 +147,7 @@ The script reads the screen and matches the prompt.
 
 ### Содержание
 
-- [Что нового в v2.1](#что-нового-в-v21)
+- [Что нового в v2.2](#что-нового-в-v22)
 - [Возможности](#возможности)
 - [Структура проекта](#структура-проекта)
 - [Установка](#установка)
@@ -155,12 +156,13 @@ The script reads the screen and matches the prompt.
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
 
-### Что нового в v2.1
+### Что нового в v2.2
 
-- **Ленивый CheatNetwork** — Вкладка CheatNetwork больше не открывается при запуске. Она создаётся только если прямой API не вернул ответы, и автоматически закрывается после парсинга.
-- **Умный выбор ошибок** — Количество неправильных ответов (`--wrong`) теперь запрашивается _после_ загрузки ответов, когда вы уже видите общее число вопросов.
-- **Модульная архитектура** — Монолитный `main.py` (~1400 строк) разбит на 9 модулей для удобства поддержки и чтения кода.
-- **Новый режим по умолчанию** — «Новый браузер» теперь рекомендуемый режим (Опция 1). Attach-режим доступен как Опция 2.
+- **Повышенная стабильность (Stale/Detached DOM)** — Безопасный обход ошибок Playwright. Если вы кликнете по варианту ответа раньше скрипта, программа продолжит работу без краша.
+- **Запуск теста с любого вопроса** — Поддерживается довыполнение тестов с середины (например, с 10-го вопроса). Индексы намеренных ошибок перераспределяются среди оставшихся вопросов.
+- **Авто-обход окон авторизации CheatNetwork** — Скрипт распознает сообщения «Not logged in» / «Access denied», возвращается на форму и пробует отправить запрос заново до 3 раз без перезагрузки страниц (предотвращает бан IP).
+- **Авто-переход к тесту** — Браузер Wayground автоматически перейдет по ссылке или введенному PIN-коду при старте, избавляя вас от ручного копирования.
+- **Флаг запуска `--quiz-input`** — Возможность передавать URL или PIN-код игры сразу через консоль при запуске с помощью `-q / --quiz-input`.
 
 ### Возможности
 
