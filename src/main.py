@@ -29,11 +29,16 @@ try:
         from playwright_stealth import Stealth
         async def apply_stealth(page):
             await Stealth().apply_stealth_async(page)
-    except ImportError:
-        # playwright-stealth v1.x fallback
-        from playwright_stealth import stealth_async
-        async def apply_stealth(page):
-            await stealth_async(page)
+    except Exception:
+        try:
+            # playwright-stealth v1.x fallback
+            from playwright_stealth import stealth_async
+            async def apply_stealth(page):
+                await stealth_async(page)
+        except Exception:
+            # Safe fallback if stealth data files are missing or incompatible
+            async def apply_stealth(page):
+                pass
 except ImportError:
     print("\n[ERROR] Missing dependencies. Install them with:")
     print("  pip install -r requirements.txt")
@@ -43,10 +48,21 @@ except ImportError:
 from config import ANSWERS_URL, TEST_URL, C_RESET, C_GREEN, C_YELLOW, C_CYAN, C_BOLD, C_DIM
 from ui import clear_screen, print_banner, Spinner, log_info, log_error, log_step, print_phase_header
 from browser import is_port_open, launch_browser_with_debug
-from api import intercept_response, fetch_api_answers, _quiz_id_event, _captured_quiz_id
+from api import (
+    intercept_response,
+    fetch_api_answers,
+    find_quiz_id,
+    is_valid_quiz_id,
+    extract_quiz_id_from_url,
+    resolve_pin_to_quiz_id,
+    retrieve_answers,
+    fetch_answers_by_any_identifier,
+    set_allow_quizit_bot,
+)
 from scraper import scrape_answers
 from automation import automate_test, scrape_results, _read_question_counter
 from tabs import get_live_pages, pick_tab
+from matching import get_display_questions
 
 
 # ─── Entry Point ───────────────────────────────────────────────
@@ -99,7 +115,16 @@ Modes:
         default=None,
         help="Quiz URL or game PIN code to use for answer extraction."
     )
+    parser.add_argument(
+        "--no-bot",
+        action="store_true",
+        default=False,
+        help="Do not use Quizit solver bot (prevents bot player from entering lobby)."
+    )
     args = parser.parse_args()
+
+    if args.no_bot:
+        set_allow_quizit_bot(False)
 
     print_banner()
 
@@ -109,13 +134,14 @@ Modes:
         print(f"{C_DIM}{'─'*60}{C_RESET}")
         
         print(f"  {C_BOLD}Select Mode:{C_RESET}")
-        print(f"  {C_CYAN}1{C_RESET}) Open new standalone browser (Recommended!)")
-        print(f"  {C_CYAN}2{C_RESET}) Attach to your Edge/Chrome (keeps logins)")
+        print(f"  {C_CYAN}1{C_RESET}) Attach to your Edge/Chrome ({C_GREEN}Recommended! Keeps browser open if console closes, preserves logins{C_RESET})")
+        print(f"  {C_CYAN}2{C_RESET}) Open new standalone browser")
         
         mode = await asyncio.get_event_loop().run_in_executor(
             None, input, "  Enter choice [default: 1]: "
         )
-        args.attach = (mode.strip() == '2')
+        # Default to Mode 1 (Attach) for maximum persistence and login retention
+        args.attach = (mode.strip() != '2')
         
         print()
         print(f"  {C_BOLD}Quiz URL or game code:{C_RESET}")
@@ -124,6 +150,17 @@ Modes:
             None, input, f"  Enter URL or code (or press Enter to skip): "
         )
         args.quiz_input = quiz_input_raw.strip() if quiz_input_raw.strip() else None
+
+        print()
+        print(f"  {C_BOLD}Use Quizit Solver Bot for live PINs?{C_RESET}")
+        print(f"  {C_DIM}Note: Quizit Bot connects as a guest ('Reconnecting...') to fetch answers.{C_RESET}")
+        print(f"  {C_DIM}Select 'n' if teacher is actively watching the lobby.{C_RESET}")
+        bot_choice = await asyncio.get_event_loop().run_in_executor(
+            None, input, "  Allow Quizit Bot? [Y/n, default: Y]: "
+        )
+        if bot_choice.strip().lower() == 'n':
+            set_allow_quizit_bot(False)
+            log_step("Quizit Bot disabled. Will use Direct API / CheatNetwork.")
 
         print(f"{C_DIM}{'─'*60}{C_RESET}\n")
 
@@ -173,7 +210,16 @@ Modes:
                 except Exception:
                     pass
                 
-                page_test = await ctx.new_page()
+                # Reuse empty/newtab page if available instead of opening a duplicate tab
+                page_test = None
+                for pg in ctx.pages:
+                    u = (pg.url or "").lower().rstrip("/")
+                    if u in ("about:blank", "edge://newtab", "chrome://newtab") or not u:
+                        page_test = pg
+                        break
+                if not page_test:
+                    page_test = await ctx.new_page()
+
                 await page_test.goto("https://wayground.com", wait_until="domcontentloaded")
 
                 print()
@@ -195,6 +241,10 @@ Modes:
             all_pages = await get_live_pages(browser)
             log_info(f"Found {len(all_pages)} open tab(s).")
             page_test = await pick_tab(all_pages, "🎯 TEST (Wayground)", "wayground")
+            try:
+                page_test.on("response", intercept_response)
+            except Exception:
+                pass
 
             print()
 
@@ -311,55 +361,37 @@ async def _run_phases(page_test, browser, args):
     answers_db = None
     answer_source = "Unknown"
     
-    # Check if we intercepted the quiz ID via network or if we can extract it right now
-    if not _quiz_id_event.is_set():
-        # Try DOM extraction as a quick fallback
+    # ── Phase 1: Retrieve Answer Keys via multi-tiered engine ──
+    async with Spinner("Retrieving answers (Quizit API / Game PIN / Direct API / Network)..."):
+        answers_db, answer_source = await retrieve_answers(
+            page_test, quiz_input=args.quiz_input, timeout=6.0
+        )
+
+    if answers_db:
+        log_info(f"✅ Loaded {len(answers_db)} answers [{answer_source}]")
+
+    # If automatic answer retrieval didn't succeed, offer manual PIN / URL / ID entry
+    if not answers_db:
+        log_step(f"{C_YELLOW}Could not automatically locate answers.{C_RESET}")
+        print(f"  {C_DIM}Enter Game PIN (e.g. 665058), Room Hash, Quiz ID, or URL.{C_RESET}")
+        print(f"  {C_DIM}Press ENTER to fall back to CheatNetwork.{C_RESET}")
         try:
-            quiz_id_eval = await page_test.evaluate("""
-                () => {
-                    if (window.quizId) return window.quizId;
-                    const html = document.documentElement.innerHTML;
-                    const idx = html.indexOf('"quizInfo"');
-                    if (idx !== -1) {
-                        const sub = html.substring(idx, idx + 2000);
-                        const m = sub.match(/"_id"\\s*:\\s*"([a-fA-F0-9]{24})"/);
-                        if (m) return m[1];
-                    }
-                    return null;
-                }
-            """)
-            if quiz_id_eval:
-                log_info(f"✅ Extracted quiz_id from page DOM: {quiz_id_eval}")
-                import api
-                api._captured_quiz_id = quiz_id_eval
-                _quiz_id_event.set()
+            manual_input = await asyncio.get_event_loop().run_in_executor(
+                None, input, "  ▶  PIN, Hash, ID or URL (or press ENTER to skip): "
+            )
+            clean_man = manual_input.strip()
+            if clean_man:
+                async with Spinner(f"Resolving answers for '{clean_man}'..."):
+                    loop = asyncio.get_event_loop()
+                    answers_db, answer_source = await loop.run_in_executor(
+                        None, fetch_answers_by_any_identifier, clean_man
+                    )
+                    if answers_db:
+                        log_info(f"✅ Loaded {len(answers_db)} answers [{answer_source}]")
+                    else:
+                        log_error("Could not resolve answers from manual input.")
         except Exception:
             pass
-
-    # Wait up to 5 seconds for the network interceptor
-    if not _quiz_id_event.is_set():
-        async with Spinner("Waiting for quiz data from network..."):
-            try:
-                await asyncio.wait_for(_quiz_id_event.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                pass
-
-    # Re-import to get the potentially updated value
-    from api import _captured_quiz_id as quiz_id
-
-    if quiz_id:
-        log_info(f"Quiz ID: {quiz_id}")
-        async with Spinner("Fetching answers via Direct API..."):
-            try:
-                answers_db = await asyncio.get_event_loop().run_in_executor(
-                    None, fetch_api_answers, quiz_id
-                )
-                answer_source = "Direct API"
-            except Exception as e:
-                log_error(f"Direct API failed: {e}")
-                answers_db = None
-        if answers_db:
-            log_info(f"✅ Loaded {len(answers_db)} answers from API")
 
     # ── Lazy CheatNetwork fallback ──
     if not answers_db:
@@ -434,9 +466,10 @@ async def _run_phases(page_test, browser, args):
             log_error("Please check your quiz link/PIN and try again.")
             sys.exit(1)
 
+    display_questions = get_display_questions(answers_db)
     print(f"\n{C_CYAN}{'#':<4} {'Question':<55} {'Answer(s)':<35}{C_RESET}  {C_DIM}[Source: {answer_source}]{C_RESET}")
     print(f"{C_DIM}{'─'*4} {'─'*55} {'─'*35}{C_RESET}")
-    for i, (q, answers_list) in enumerate(answers_db.items()):
+    for i, (q, answers_list) in enumerate(display_questions):
         q_short = q[:52] + "..." if len(q) > 52 else q
         if len(answers_list) == 1:
             a_short = answers_list[0][:32] + "..." if len(answers_list[0]) > 32 else answers_list[0]
@@ -447,9 +480,9 @@ async def _run_phases(page_test, browser, args):
         print(f"{C_DIM}{i+1:<4}{C_RESET} {q_short:<55} {C_GREEN}{a_short:<35}{C_RESET}")
     print()
 
-    # ── Ask how many wrong answers now that we know the total ──
+    # ── Ask how many wrong answers now that we know the real question count ──
     _, page_total = await _read_question_counter(page_test)
-    total_questions = page_total if page_total > 0 else len(answers_db)
+    total_questions = page_total if page_total > 0 else len(display_questions)
 
     wrong_count = args.wrong  # Use CLI value if provided
     if wrong_count == 0:
@@ -476,7 +509,7 @@ async def _run_phases(page_test, browser, args):
 
     # ── Phase 2 ──
     print_phase_header(2, "Automating test")
-    await automate_test(page_test, answers_db, wrong_count=wrong_count)
+    await automate_test(page_test, answers_db, wrong_count=wrong_count, expected_total=total_questions)
 
     # ── Phase 3: Scrape results ──
     clear_screen()

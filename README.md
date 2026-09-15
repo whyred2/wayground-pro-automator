@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v2.2</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v2.4</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Direct API Interception & Lazy CheatNetwork Fallback
     <br />
@@ -25,6 +25,8 @@
 
 ### Table of Contents
 
+- [What's New in v2.4](#whats-new-in-v24)
+- [What's New in v2.3](#whats-new-in-v23)
 - [What's New in v2.2](#whats-new-in-v22)
 - [Features](#features)
 - [Project Structure](#project-structure)
@@ -32,6 +34,23 @@
 - [Quick Start](#quick-start)
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
+
+### What's New in v2.4
+
+- **Support for Modern Wayground/Quizizz Assessment & Test Mode** — Full native support for the new assessment interface (`data-testid="question-scroll-container"` with radio groups `data-testid="option-trigger-*"` and question stem `[data-highlight-block="stem"]`).
+- **Auto-Advance / Next Button Navigation ("Далі ->" / "Next" / "Submit")** — In assessment mode where choosing a radio button does not auto-advance, the automator automatically locates and clicks the "Next" / "Submit" button (`Далі`, `Далее`, `Next`, `Submit`, `Завершити`, `Finish`) to transition to the next question.
+- **Multi-Language Question Counter Detection** — Seamlessly reads test progress from footers in Ukrainian (`Питання 1 з 50`), Russian (`Вопрос 1 из 50`), English (`Question 1 of 50`), or classic spans. Live total updates dynamically if questions differ from initial database count.
+- **Accurate Radio Button Text Extraction** — Ignores letter badges (`A`, `B`, `C`, `D`) inside `data-testid="radio"`, directly extracting the actual answer text from `.text-renderer` / `[data-highlight-block="option:*"]`.
+- **Protected Intermission Logic** — Prevents accidental skipping of active questions while animations load, ensuring answers are always submitted before proceeding.
+
+### What's New in v2.3
+
+- **Redemption Question Support (Second Chance)** — Automatically detects the Redemption Question screen (`screen-redemption-question-selector`), clicks a card, and solves the retry question without freezing.
+- **Ranked Option Matching & Anti-Distractor Engine** — Strict 100% exact match priority. Eliminates false clicks on deceptive teacher distractors (e.g. `less` vs `more`, `perihelion` vs `aphelion`, `July` vs `January`).
+- **Clean Question Display & Accurate Mistakes Count** — Filters out internal MongoDB ObjectIds, `id:`, and `img:` alias keys from Phase 1. The test summary and mistakes settings now reflect the real number of questions in the test (e.g. 20 instead of 61).
+- **Dedicated Browser Profile for Instant Attach** — Uses `%LocalAppData%\WaygroundAutomator\BrowserProfile` for Edge/Chrome CDP mode. Port 9222 opens in < 1 second with zero conflicts, even if you have 100 tabs open in your personal browser. Logins are remembered forever across runs.
+- **Quizit Bot Deduplication & Toggle** — Single-flight lock prevents duplicate `Reconnecting...` player bots in live lobbies. Added interactive toggle and `--no-bot` CLI flag.
+- **Media & Image Question Support** — Matches questions and choices using `data-quesid`, `alt` attributes, and image filenames. Intelligently waits for animations and intermission leaderboards.
 
 ### What's New in v2.2
 
@@ -108,12 +127,14 @@ _(Or just run the `.exe` file)_
 
 You can skip the interactive menu by providing arguments directly:
 
-| Parameter           | Description                                   | Default                                    |
-| ------------------- | --------------------------------------------- | ------------------------------------------ |
-| `--attach`          | Attach to Edge/Chrome (auto-launch if needed) | `False`                                    |
-| `--wrong N`         | Number of intentionally wrong answers         | `0` (asks interactively if not set)        |
-| `--test-url URL`    | URL of the test page (for normal mode)        | `https://wayground.com`                    |
-| `--answers-url URL` | URL of the answer key page (for fallback)     | `https://cheatnetwork.eu/services/quizizz` |
+| Parameter              | Description                                        | Default                                    |
+| ---------------------- | -------------------------------------------------- | ------------------------------------------ |
+| `--attach`             | Attach to Edge/Chrome (auto-launch if needed)      | `False`                                    |
+| `--wrong N`            | Number of intentionally wrong answers              | `0` (asks interactively if not set)        |
+| `-q, --quiz-input STR` | Quiz URL or game PIN code for answer extraction    | `None`                                     |
+| `--no-bot`             | Disable Quizit solver bot in live games            | `False`                                    |
+| `--test-url URL`       | URL of the test page (for normal mode)             | `https://wayground.com`                    |
+| `--answers-url URL`    | URL of the answer key page (for fallback)          | `https://cheatnetwork.eu/services/quizizz` |
 
 **Examples:**
 
@@ -147,6 +168,8 @@ The script reads the screen and matches the prompt.
 
 ### Содержание
 
+- [Что нового в v2.4](#что-нового-в-v24)
+- [Что нового в v2.3](#что-нового-в-v23)
 - [Что нового в v2.2](#что-нового-в-v22)
 - [Возможности](#возможности)
 - [Структура проекта](#структура-проекта)
@@ -155,6 +178,23 @@ The script reads the screen and matches the prompt.
 - [Параметры запуска](#параметры-запуска)
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
+
+### Что нового в v2.4
+
+- **Поддержка новой оболочки тестов Wayground/Quizizz (Assessment / Test Mode)** — Полноценная работа с обновлённым интерфейсом тестирования (`data-testid="question-scroll-container"`, радиокнопки `data-testid="option-trigger-*"` и вопрос в `[data-highlight-block="stem"]`).
+- **Автоматический переход к следующему вопросу («Далі ->» / «Next» / «Submit»)** — В режиме экзамена/теста, где выбор радиокнопки не перелистывает вопрос автоматически, программа нажимает кнопку перехода («Далі», «Далее», «Next», «Submit», «Завершити», «Finish»).
+- **Мультиязычный счётчик вопросов** — Считывание номера вопроса и общего количества из любого футера на украинском («Питання 1 з 50»), русском («Вопрос 1 из 50»), английском («Question 1 of 50») или классических span. Если реальный тест больше загруженной базы, общее число автоматически синхронизируется.
+- **Точное извлечение текста вариантов** — Буквы маркировки (`A`, `B`, `C`, `D`) внутри радио-переключателей игнорируются, а текст варианта извлекается напрямую из `.text-renderer` / `[data-highlight-block="option:*"]`.
+- **Защита от ложного пропуска вопросов** — Программа гарантирует, что кнопка «Далее» нажимается только после выбора ответа, а не во время анимации или загрузки вопроса.
+
+### Что нового в v2.3
+
+- **Поддержка Redemption Question (Второй шанс)** — Программа автоматически распознаёт экран искупления (`screen-redemption-question-selector`), выбирает карточку и решает повторный вопрос без зависания на таймаутах.
+- **Ранжированный скоринг вариантов и защита от дистракторов** — Строгий приоритет 100% точного совпадения. Варианты-ловушки (дистракторы), похожие на 85–92% и отличающиеся всего одним словом (*less/more*, *perihelion/aphelion*, *July/January*), больше не нажимаются ошибочно.
+- **Чистый список вопросов и точная настройка ошибок** — Из таблицы Phase 1 удалены внутренние технические MongoDB ObjectIds, префиксы `id:` и `img:`. Программа отображает ровно то количество вопросов, которое есть в тесте (например, 20 вместо 61), а намеренные ошибки распределяются точно.
+- **Мгновенное подключение к Edge/Chrome через изолированный профиль** — Профиль `%LocalAppData%\WaygroundAutomator\BrowserProfile` запускает отладочный порт за 1 секунду без конфликтов с вашим личным Edge и фоновыми процессами. Сессии и логины навсегда сохраняются, а браузер не закрывается при выходе из консоли.
+- **Дедупликация Quizit Bot и флаг `--no-bot`** — Защита от дублирования ботов `Reconnecting...` в лобби учителя (Single-Flight блокировка). Добавлен флаг `--no-bot` и интерактивное подтверждение в меню.
+- **Полноценная поддержка вопросов с картинками** — Точное сопоставление по `data-quesid`, `alt` и именам файлов изображений. Умное ожидание промежуточных анимаций, таблиц лидеров и страйков.
 
 ### Что нового в v2.2
 
@@ -231,10 +271,14 @@ _(Или просто откройте файл `.exe`)_
 
 Можно пропустить интерактивное меню, передав аргументы:
 
-| Параметр    | Описание                                              |
-| ----------- | ----------------------------------------------------- |
-| `--attach`  | Подключиться к Edge/Chrome напрямую                   |
-| `--wrong N` | Сделать N специальных ошибок (иначе спросит в конце)  |
+| Параметр              | Описание                                              | По умолчанию                               |
+| --------------------- | ----------------------------------------------------- | ------------------------------------------ |
+| `--attach`            | Подключиться к Edge/Chrome (автозапуск при нужде)     | `False`                                    |
+| `--wrong N`           | Сделать N намеренных ошибок (иначе спросит в меню)    | `0` (100% правильных)                      |
+| `-q, --quiz-input STR`| Ссылка на тест или PIN-код игры для выгрузки ответов  | `None`                                     |
+| `--no-bot`            | Отключить гостевого бота Quizit для live-игр          | `False`                                    |
+| `--test-url URL`      | URL страницы теста                                    | `https://wayground.com`                    |
+| `--answers-url URL`   | URL сервиса ответов CheatNetwork (fallback)           | `https://cheatnetwork.eu/services/quizizz` |
 
 **Примеры:**
 

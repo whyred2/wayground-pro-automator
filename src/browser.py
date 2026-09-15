@@ -39,11 +39,14 @@ def find_browser_exe() -> tuple[str, str]:
 
 
 def get_user_data_dir(browser_name: str) -> str:
-    """Get the default user data directory for the browser."""
-    if browser_name == "Edge":
-        return os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\User Data")
-    else:
-        return os.path.expandvars(r"%LocalAppData%\Google\Chrome\User Data")
+    """
+    Get the persistent user data directory for automation.
+    Using a dedicated profile prevents conflicts with already running Edge/Chrome instances,
+    ensures the debug port opens instantly, and permanently preserves Wayground logins.
+    """
+    profile_dir = os.path.expandvars(r"%LocalAppData%\WaygroundAutomator\BrowserProfile")
+    os.makedirs(profile_dir, exist_ok=True)
+    return profile_dir
 
 
 def is_port_open(port: int) -> bool:
@@ -59,18 +62,20 @@ def is_port_open(port: int) -> bool:
 def launch_browser_with_debug(port: int) -> subprocess.Popen:
     """
     Find Edge/Chrome, launch with --remote-debugging-port.
-    Uses the user's existing profile so all logins are preserved.
+    Uses dedicated automator profile so debug port opens instantly even
+    if user already has Edge/Chrome running with 100 tabs.
     """
     exe_path, browser_name = find_browser_exe()
     user_data = get_user_data_dir(browser_name)
 
     log_info(f"Found {browser_name}: {exe_path}")
-    log_info(f"Profile: {user_data}")
+    log_info(f"Automation Profile: {user_data}")
 
     cmd = [
         exe_path,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data}",
+        "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
     ]
@@ -80,17 +85,17 @@ def launch_browser_with_debug(port: int) -> subprocess.Popen:
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+        creationflags=(subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0,
     )
 
-    # Wait for browser to start and open the debug port
-    for i in range(15):
+    # Wait for browser to start and open the debug port (typically 1-2 seconds with dedicated profile)
+    for i in range(12):
         if is_port_open(port):
-            log_info(f"{browser_name} is ready! (port {port})")
+            log_info(f"✅ {browser_name} is ready and connected! (port {port})")
             return proc
-        time.sleep(1)
+        time.sleep(0.8)
         if i % 3 == 2:
-            log_step(f"Waiting for {browser_name} to start... ({i+1}s)")
+            log_step(f"Waiting for {browser_name} port {port}... ({int((i+1)*0.8)}s)")
 
     print()
     log_error(f"{browser_name} is running, but port {port} is not responding.")
