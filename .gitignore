@@ -12,6 +12,9 @@ __pycache__/
 *$py.class
 venv/
 .env
+.env.*
+!.env.example
+scratch/
 
 # Playwright & Browser
 user_data/
@@ -21,3 +24,4 @@ test-results/
 # Other
 *.html
 .idea/
+.wrangler/

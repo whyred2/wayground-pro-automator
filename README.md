@@ -3,11 +3,15 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v2.4</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v3.0</h1>
   <p align="center">
-    Automated test-taking on <b>wayground.com</b> with Direct API Interception & Lazy CheatNetwork Fallback
+    Automated test-taking on <b>wayground.com</b> with Smart Hybrid AI Solver & Direct API Interception
     <br />
     <a href="#-english">English</a> · <a href="#-русский">Русский</a>
+    <br /><br />
+    <a href="https://github.com/whyred2/wayground-pro-automator/releases/latest">
+      <img src="https://img.shields.io/github/v/release/whyred2/wayground-pro-automator?style=for-the-badge&logo=windows&logoColor=white&label=Download%20.EXE&color=00c853" alt="Download Latest Release">
+    </a>
   </p>
 </p>
 
@@ -25,6 +29,7 @@
 
 ### Table of Contents
 
+- [What's New in v3.0](#whats-new-in-v30)
 - [What's New in v2.4](#whats-new-in-v24)
 - [What's New in v2.3](#whats-new-in-v23)
 - [What's New in v2.2](#whats-new-in-v22)
@@ -35,8 +40,22 @@
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
 
+### What's New in v3.0
+
+- **Smart Hybrid AI Solver Gateway** — Full integration with Cloudflare Workers AI and Groq Cloud. Pure zero-config experience for `.exe` releases:
+  - **Cloudflare Workers AI (Primary)**: Solves questions autonomously using `@cf/meta/llama-3.3-70b-instruct` for complex reasoning and `@cf/meta/llama-3.2-11b-vision-instruct` for diagrams, geometry, and visual options.
+  - **Groq Cloud (Fallback)**: Seamless failover to high-speed `qwen/qwen3.8-27b` if Cloudflare daily quotas are exceeded.
+  - **100% Secure**: Zero hardcoded API keys in client binaries; all secret keys are protected behind the Cloudflare AI Gateway with IP-based rate limiting.
+- **Fill-in-the-Blank (FIB) & Keystroke Automation** — Native automated resolution for text blank questions. Automatically extracts context, consults AI for the exact missing terminology, fills inputs with synthetic keystrokes, and generates human-like mistakes when deliberate errors are configured.
+- **KaTeX & LaTeX Formula Extraction** — Complete mathematical formula support. Parses raw LaTeX expressions from KaTeX and MathML DOM trees, preventing empty option texts on math tests.
+- **Assessment & Test Mode Auto-Navigation** — Full native support for the new assessment interface (`data-testid="question-scroll-container"` with radio groups and Next/Submit button navigation).
+- **Secure BYOK & .env Architecture** — Support for `.env` and `.env.example`, allowing users to optionally provide their own personal OpenAI/Groq keys without modifying source code.
+
 ### What's New in v2.4
 
+- **AI Solver Engine (Groq / OpenAI SDK with `qwen/qwen3.8-27b`)** — Real-time automated test-solving powered by the OpenAI Python SDK connected to Groq's high-speed API (`qwen/qwen3.8-27b`). Delivers top accuracy across academic, business, and scientific subjects.
+- **Fill-in-the-Blank (FIB) & Text Input Support** — Native automated resolution for text blank questions. Automatically extracts context, consults AI for the exact missing terminology, fills inputs with synthetic keystrokes, and advances smoothly.
+- **Auto-Fallback & Gap-Filling** — If Direct API and CheatNetwork cannot locate answers, the automator seamlessly switches to the AI Solver. Missing database questions are resolved by AI instead of guessing randomly.
 - **Support for Modern Wayground/Quizizz Assessment & Test Mode** — Full native support for the new assessment interface (`data-testid="question-scroll-container"` with radio groups `data-testid="option-trigger-*"` and question stem `[data-highlight-block="stem"]`).
 - **Auto-Advance / Next Button Navigation ("Далі ->" / "Next" / "Submit")** — In assessment mode where choosing a radio button does not auto-advance, the automator automatically locates and clicks the "Next" / "Submit" button (`Далі`, `Далее`, `Next`, `Submit`, `Завершити`, `Finish`) to transition to the next question.
 - **Multi-Language Question Counter Detection** — Seamlessly reads test progress from footers in Ukrainian (`Питання 1 з 50`), Russian (`Вопрос 1 из 50`), English (`Question 1 of 50`), or classic spans. Live total updates dynamically if questions differ from initial database count.
@@ -75,7 +94,8 @@
 ```
 src/
 ├── main.py          # Entry point, CLI, interactive menu
-├── config.py        # Constants, selectors, timing, colors
+├── config.py        # Constants, selectors, timing, colors, AI settings
+├── ai_solver.py     # AI real-time solver (OpenAI SDK / Groq / Qwen, text & vision)
 ├── ui.py            # Logging, Spinner, banners
 ├── browser.py       # Edge/Chrome detection & launch
 ├── api.py           # Network interception, Wayground API
@@ -87,9 +107,10 @@ src/
 
 ### Installation
 
-#### Option 1: Using the Standalone `.exe` (Easy)
+#### Option 1: Using the Standalone `.exe` (Recommended)
 
-If you have the compiled `WaygroundAutomator.exe`, no installation is required! Just double click it or run it from CMD.
+1. Download the latest **[WaygroundAutomator.exe](https://github.com/whyred2/wayground-pro-automator/releases/latest)** from the **[GitHub Releases Page](https://github.com/whyred2/wayground-pro-automator/releases)**.
+2. Double-click to run — no Python, Node.js, or API keys required! It works out-of-the-box using the built-in Cloudflare AI Gateway.
 
 #### Option 2: Running from Python Source
 
@@ -101,6 +122,10 @@ pip install -r requirements.txt
 
 # 2. Install Chromium browser for Playwright
 python -m playwright install chromium
+
+# 3. Configure API keys (for AI Solver)
+cp .env.example .env
+# Edit .env and paste your free Groq API key (from https://console.groq.com/keys)
 ```
 
 ### Quick Start
@@ -127,20 +152,28 @@ _(Or just run the `.exe` file)_
 
 You can skip the interactive menu by providing arguments directly:
 
-| Parameter              | Description                                        | Default                                    |
-| ---------------------- | -------------------------------------------------- | ------------------------------------------ |
-| `--attach`             | Attach to Edge/Chrome (auto-launch if needed)      | `False`                                    |
-| `--wrong N`            | Number of intentionally wrong answers              | `0` (asks interactively if not set)        |
-| `-q, --quiz-input STR` | Quiz URL or game PIN code for answer extraction    | `None`                                     |
-| `--no-bot`             | Disable Quizit solver bot in live games            | `False`                                    |
-| `--test-url URL`       | URL of the test page (for normal mode)             | `https://wayground.com`                    |
-| `--answers-url URL`    | URL of the answer key page (for fallback)          | `https://cheatnetwork.eu/services/quizizz` |
+| Parameter                 | Description                                              | Default                                    |
+| ------------------------- | -------------------------------------------------------- | ------------------------------------------ |
+| `--ai`                    | Use AI solver exclusively (no database lookups)          | `False`                                    |
+| `--no-ai`                 | Disable AI solver and auto-fallback completely           | `False`                                    |
+| `--ai-key KEY`            | Custom API key for AI solver (OpenAI/Groq compatible)    | From `.env` / `OPENAI_API_KEY`             |
+| `--ai-model MODEL`        | Custom model for AI solver                               | `qwen/qwen3.8-27b`                         |
+| `--ai-base URL`           | Custom OpenAI API base URL                               | `https://api.groq.com/openai/v1`           |
+| `--attach`                | Attach to Edge/Chrome (auto-launch if needed)            | `False`                                    |
+| `--wrong N`               | Number of intentionally wrong answers                    | `0` (asks interactively if not set)        |
+| `-q, --quiz-input STR`    | Quiz URL or game PIN code for answer extraction          | `None`                                     |
+| `--no-bot`                | Disable Quizit solver bot in live games                  | `False`                                    |
+| `--test-url URL`          | URL of the test page (for normal mode)                   | `https://wayground.com`                    |
+| `--answers-url URL`       | URL of the answer key page (for fallback)                | `https://cheatnetwork.eu/services/quizizz` |
 
 **Examples:**
 
 ```powershell
 # Interactive menu (recommended)
 python src/main.py
+
+# Auto-start with AI solver directly
+python src/main.py --ai
 
 # Auto-start attach mode with 5 intentionally wrong answers
 python src/main.py --attach --wrong 5
@@ -168,6 +201,7 @@ The script reads the screen and matches the prompt.
 
 ### Содержание
 
+- [Что нового в v3.0](#что-нового-в-v30)
 - [Что нового в v2.4](#что-нового-в-v24)
 - [Что нового в v2.3](#что-нового-в-v23)
 - [Что нового в v2.2](#что-нового-в-v22)
@@ -178,6 +212,17 @@ The script reads the screen and matches the prompt.
 - [Параметры запуска](#параметры-запуска)
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
+
+### Что нового в v3.0
+
+- **Умный гибридный ИИ-шлюз (Smart Hybrid AI Gateway)** — Полная интеграция с Cloudflare Workers AI и Groq Cloud. Работа «из коробки» для пользователей `.exe` без необходимости регистрироваться на зарубежных сайтах или вводить ключи:
+  - **Cloudflare Workers AI (Основной):** Автономное решение тестов с помощью флагманской модели `@cf/meta/llama-3.3-70b-instruct` (70 млрд параметров) и мультимодальной `@cf/meta/llama-3.2-11b-vision-instruct` для вопросов с картинками, графиками и геометрией.
+  - **Groq Cloud (Резервный):** Автоматическое прозрачное переключение на скоростной Groq (`qwen/qwen3.8-27b`) при превышении дневных квот Cloudflare.
+  - **100% безопасность:** Ключи скрыты за защищенным шлюзом Cloudflare с защитой от спама (Rate Limiter по IP).
+- **Автоматизация Fill-in-the-Blank (Ввод пропущенных слов)** — Распознавание текстовых пропусков, запрос точного ответа у нейросети, посимвольный ввод и генерация реалистичных человеческих ошибок при включенном режиме намеренных ошибок (`--wrong`).
+- **Извлечение формул KaTeX / LaTeX** — Нативная поддержка математики и физики. Программа извлекает исходный LaTeX-код из скрытых блоков KaTeX/MathML, гарантируя правильное понимание формул моделью.
+- **Поддержка Assessment / Test Mode** — Полноценная навигация по обновленной оболочке тестов Wayground с автоматическим нажатием кнопок «Далі ->» / «Next» / «Submit».
+- **Архитектура .env (BYOK)** — Возможность указать свой личный ключ через `.env` файл или флаг `--ai-key`.
 
 ### Что нового в v2.4
 
@@ -231,9 +276,10 @@ src/
 
 ### Установка
 
-#### Способ 1: Использование `.exe` (Самый простой)
+#### Способ 1: Использование готового `.exe` (Рекомендуется)
 
-Если у вас есть скомпилированный `WaygroundAutomator.exe`, установка не требуется! Просто запустите его.
+1. Скачайте свежую версию **[WaygroundAutomator.exe](https://github.com/whyred2/wayground-pro-automator/releases/latest)** со страницы **[Релизов GitHub](https://github.com/whyred2/wayground-pro-automator/releases)**.
+2. Запустите файл двойным кликом — установка Python, браузеров и ввод API-ключей **не требуются**! Программа сразу готова к работе через встроенный Cloudflare AI Gateway.
 
 #### Способ 2: Запуск из исходников Python
 
@@ -245,6 +291,10 @@ pip install -r requirements.txt
 
 # 2. Установите браузер Chromium для Playwright
 python -m playwright install chromium
+
+# 3. Настройте API-ключ для ИИ-решателя (AI Solver)
+cp .env.example .env
+# Откройте .env и вставьте ваш бесплатный ключ Groq (получить на https://console.groq.com/keys)
 ```
 
 ### Быстрый старт
@@ -271,18 +321,26 @@ _(Или просто откройте файл `.exe`)_
 
 Можно пропустить интерактивное меню, передав аргументы:
 
-| Параметр              | Описание                                              | По умолчанию                               |
-| --------------------- | ----------------------------------------------------- | ------------------------------------------ |
-| `--attach`            | Подключиться к Edge/Chrome (автозапуск при нужде)     | `False`                                    |
-| `--wrong N`           | Сделать N намеренных ошибок (иначе спросит в меню)    | `0` (100% правильных)                      |
-| `-q, --quiz-input STR`| Ссылка на тест или PIN-код игры для выгрузки ответов  | `None`                                     |
-| `--no-bot`            | Отключить гостевого бота Quizit для live-игр          | `False`                                    |
-| `--test-url URL`      | URL страницы теста                                    | `https://wayground.com`                    |
-| `--answers-url URL`   | URL сервиса ответов CheatNetwork (fallback)           | `https://cheatnetwork.eu/services/quizizz` |
+| Параметр                 | Описание                                                | По умолчанию                               |
+| ------------------------ | ------------------------------------------------------- | ------------------------------------------ |
+| `--ai`                   | Решать тест напрямую через AI Solver (без поиска базы)  | `False`                                    |
+| `--no-ai`                | Полностью отключить ИИ-солвер и авто-переключение на ИИ | `False`                                    |
+| `--ai-key KEY`           | Пользовательский API ключ (Groq / OpenAI)               | Из `.env` / `OPENAI_API_KEY`               |
+| `--ai-model MODEL`       | Модель для решения (Groq / OpenAI)                     | `qwen/qwen3.8-27b`                         |
+| `--ai-base URL`          | Базовый URL OpenAI-совместимого API                     | `https://api.groq.com/openai/v1`           |
+| `--attach`               | Подключиться к Edge/Chrome (автозапуск при нужде)       | `False`                                    |
+| `--wrong N`              | Сделать N намеренных ошибок (иначе спросит в меню)      | `0` (100% правильных)                      |
+| `-q, --quiz-input STR`   | Ссылка на тест или PIN-код игры для выгрузки ответов    | `None`                                     |
+| `--no-bot`               | Отключить гостевого бота Quizit для live-игр            | `False`                                    |
+| `--test-url URL`         | URL страницы теста                                      | `https://wayground.com`                    |
+| `--answers-url URL`      | URL сервиса ответов CheatNetwork (fallback)             | `https://cheatnetwork.eu/services/quizizz` |
 
 **Примеры:**
 
 ```powershell
+# Запуск напрямую через AI Solver (qwen/qwen3.8-27b)
+python src/main.py --ai
+
 # Запуск с 6 специальными ошибками через attach-режим
 python src/main.py --attach --wrong 6
 ```

@@ -3,11 +3,24 @@ UI helpers: logging, banners, spinners, and console output formatting.
 """
 
 import os
+import sys
 import asyncio
+
+# Prevent UnicodeEncodeError on Windows CP1251 / legacy code page consoles
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from config import C_RESET, C_GREEN, C_RED, C_YELLOW, C_CYAN, C_BOLD, C_DIM
 
-VERSION = "2.4"
+VERSION = "3.0"
 
 
 def clear_screen():

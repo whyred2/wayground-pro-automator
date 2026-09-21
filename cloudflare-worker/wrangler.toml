@@ -1,0 +1,14 @@
+name = "wayground-ai-gateway"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# Environment variables
+[vars]
+SERVICE_NAME = "wayground-ai-gateway"
+
+# Cloudflare Workers AI Binding (Free 10,000 Neurons/day natively, no API keys needed)
+[ai]
+binding = "AI"
+
+# Optional: Fallback GROQ_API_KEY can be set via:
+#   npx wrangler secret put GROQ_API_KEY

@@ -2,14 +2,51 @@
 Configuration: constants, CSS selectors, timing parameters, and console colors.
 """
 
+import os
+
+
+def _load_dotenv():
+    """Lightweight loader for .env file in project root, avoiding mandatory external dependencies."""
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_file = os.path.join(root_dir, ".env")
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_dotenv()
+
+# ─── AI Solver (OpenAI / Groq / Qwen / Cloudflare Gateway) ───
+AI_API_BASE = os.getenv("OPENAI_API_BASE", os.getenv("AI_API_BASE", "https://api.groq.com/openai/v1"))
+AI_API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", "")))
+AI_MODEL = os.getenv("AI_MODEL", "qwen/qwen3.8-27b")
+AI_GATEWAY_URL = os.getenv("AI_GATEWAY_URL", "https://wayground-ai-gateway.dima74181.workers.dev").rstrip("/")
+AI_SOLVER_DEFAULT = True
+
+# Legacy Mistral fallback settings
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "ministral-14b-latest")
+MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+
 # ─── URLs ──────────────────────────────────────────────────────
 ANSWERS_URL = "https://cheatnetwork.eu/services/quizizz"
 TEST_URL = "https://wayground.com"
 
 # ─── Selectors — Answer Source (CheatNetwork) ─────────────────
-SEL_QUESTION_BOX = ".question-box"
-SEL_QUESTION_TEXT = "p.font-semibold.text-gray-200"
-SEL_ANSWER_TEXT = "ul li span"
+SEL_QUESTION_BOX = ".question-box, [class*='question-box']"
+SEL_QUESTION_TEXT = "p.font-semibold, p[class*='font-semibold'], p.break-words, p"
+SEL_ANSWER_TEXT = "ul li, ul span, li span"
 
 # ─── Selectors — CheatNetwork Form ────────────────────────────
 SEL_CN_INPUT = 'input[placeholder="Enter game pin or link"]'
@@ -34,6 +71,16 @@ SEL_OPTION_BUTTON = (
 SEL_OPTION_TEXT = (
     '[data-highlight-block^="option"], .min-w-0 [data-testid="text-renderer"], '
     '.option-text-inner, .text-container, #optionText .content-slot p, .content-slot, p'
+)
+
+# Fill-in-the-blank & open-ended input selectors
+SEL_FIB_INPUT = (
+    'input[data-testid^="fib-text-input-"], [data-testid^="fib-text-blank-"] input, '
+    '[data-testid="fib-segments"] input, input.quizizz-ui-text-input, '
+    'input[data-cy="typeahead-input"], input[data-testid="typeahead-input"], '
+    'input.text-input, textarea.text-input, input[data-cy="text-input"], '
+    'textarea[data-testid="open-ended-input"], [data-testid="open-ended-input"], '
+    'input[data-testid="open-ended-input"]'
 )
 SEL_SUBMIT_BUTTON = (
     'button[data-cy="submit-button"], button[data-testid="submit-button"], '
@@ -61,6 +108,7 @@ SEL_TOTAL_Q_NUM = 'span[data-cy="total-question-number"]'
 
 # ─── Selectors — Results Page (Wayground) ─────────────────────
 SEL_RESULTS_CONTAINER = (
+    '[data-cy="screen-summary"], .screen-summary, .assessment-mode-summary, '
     'div[data-cy="stat-correct-container"], div[data-cy="game-summary"], '
     'div[data-testid="game-summary"], div[data-testid="summary-container"], div[data-testid="report-summary"], '
     '.game-summary-container, .game-summary, .accuracy-chart-wrapper'

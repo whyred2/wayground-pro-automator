@@ -77,45 +77,71 @@ async def _parse_question_boxes(page) -> dict[str, list[str]]:
     Returns { question_text: [answer1, answer2, ...] }
     """
     answers: dict[str, list[str]] = {}
-    boxes = await page.query_selector_all(SEL_QUESTION_BOX)
+    try:
+        raw_data = await page.evaluate("""
+            () => {
+                const list = [];
+                const boxes = document.querySelectorAll('.question-box, [class*="question-box"]');
+                for (const box of boxes) {
+                    // 1. Extract question text
+                    let qEl = box.querySelector('p.font-semibold, p[class*="font-semibold"], p.break-words, p[class*="text-"]');
+                    if (!qEl) {
+                        const ps = box.querySelectorAll('p');
+                        for (const p of ps) {
+                            if (!p.closest('button')) {
+                                qEl = p;
+                                break;
+                            }
+                        }
+                    }
+                    if (!qEl) continue;
+                    const qText = (qEl.innerText || qEl.textContent || '').trim();
+                    if (!qText) continue;
 
-    log_info(f"Found {len(boxes)} question boxes. Parsing...")
+                    // 2. Extract answer text(s)
+                    const aTexts = [];
+                    const lis = box.querySelectorAll('ul li');
+                    if (lis.length > 0) {
+                        for (const li of lis) {
+                            const clone = li.cloneNode(true);
+                            clone.querySelectorAll('svg, button, [aria-hidden="true"]').forEach(el => el.remove());
+                            const aText = (clone.innerText || clone.textContent || '').trim();
+                            if (aText && !aTexts.includes(aText)) {
+                                aTexts.push(aText);
+                            }
+                        }
+                    } else {
+                        const spans = box.querySelectorAll('ul span, li span');
+                        for (const s of spans) {
+                            const t = (s.innerText || s.textContent || '').trim();
+                            if (t && !aTexts.includes(t)) aTexts.push(t);
+                        }
+                    }
+                    if (aTexts.length > 0) {
+                        list.push({ question: qText, answers: aTexts });
+                    }
+                }
+                return list;
+            }
+        """)
 
-    for i, box in enumerate(boxes):
-        # Extract question text (handle nested <span> tags)
-        q_el = await box.query_selector(SEL_QUESTION_TEXT)
-        if not q_el:
-            log_step(f"Q{i+1}: Skipped — no question text element found")
-            continue
+        log_info(f"Found {len(raw_data)} parsed question boxes.")
+        for i, item in enumerate(raw_data):
+            q_text = item["question"]
+            a_texts = item["answers"]
+            if q_text not in answers:
+                answers[q_text] = []
+            for text in a_texts:
+                if text not in answers[q_text]:
+                    answers[q_text].append(text)
 
-        q_text = (await q_el.inner_text()).strip()
-        if not q_text:
-            log_step(f"Q{i+1}: Skipped — empty question text")
-            continue
+            if len(a_texts) > 1:
+                log_step(f"Q{i+1} [MSQ {len(a_texts)} answers]: \"{q_text[:45]}...\" → {a_texts}")
+            else:
+                log_step(f"Q{i+1}: \"{q_text[:55]}...\" → \"{a_texts[0]}\"")
 
-        # Extract ALL answer options (some questions have multiple correct answers)
-        a_els = await box.query_selector_all(SEL_ANSWER_TEXT)
-        a_texts = []
-        for a_el in a_els:
-            t = (await a_el.inner_text()).strip()
-            if t:
-                a_texts.append(t)
-
-        if not a_texts:
-            log_step(f"Q{i+1}: ⚠ No answer found for: \"{q_text[:60]}...\"")
-            continue
-
-        # Store ALL answers for the question (accumulate to handle duplicate text across variations)
-        if q_text not in answers:
-            answers[q_text] = []
-        for text in a_texts:
-            if text not in answers[q_text]:
-                answers[q_text].append(text)
-                
-        if len(a_texts) > 1:
-            log_step(f"Q{i+1} [MSQ {len(a_texts)} answers]: \"{q_text[:45]}...\" → {a_texts}")
-        else:
-            log_step(f"Q{i+1}: \"{q_text[:55]}...\" → \"{a_texts[0]}\"")
+    except Exception as e:
+        log_error(f"Error while parsing question boxes: {e}")
 
     return answers
 
@@ -247,16 +273,19 @@ async def scrape_answers(page, quiz_input: str | None = None) -> dict[str, list[
         else:
             break # Success!
 
-    # Give extra time for JS to render
-    await page.wait_for_load_state("networkidle")
-    await asyncio.sleep(2)
+    # Give a brief moment for initial JS render (avoid networkidle timeout on SPAs with continuous polling)
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=2000)
+    except Exception:
+        pass
+    await asyncio.sleep(1.0)
 
     # Scroll down gradually to trigger lazy-loading of all questions
     log_step("Scrolling to load all questions...")
     prev_count = 0
-    for _ in range(20):
+    for _ in range(25):
         await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.3)
         boxes = await page.query_selector_all(SEL_QUESTION_BOX)
         if len(boxes) == prev_count and len(boxes) > 0:
             break  # No new items loaded — we're done
@@ -264,7 +293,7 @@ async def scrape_answers(page, quiz_input: str | None = None) -> dict[str, list[
 
     # Scroll back to top
     await page.evaluate("window.scrollTo(0, 0)")
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.3)
 
     # ── Parse all question boxes ──
     answers = await _parse_question_boxes(page)

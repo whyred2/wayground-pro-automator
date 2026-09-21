@@ -44,6 +44,12 @@ def is_quizit_bot_allowed() -> bool:
     return _allow_quizit_bot
 
 
+def get_discovered_pin() -> str | None:
+    """Return the Game PIN captured by the network listener, if any."""
+    global _discovered_pin
+    return _discovered_pin
+
+
 def is_valid_quiz_id(val: any) -> bool:
     """Check if a value is a valid 24-character hexadecimal MongoDB ObjectId."""
     return isinstance(val, str) and len(val.strip()) == 24 and bool(HEX_24_REGEX.match(val.strip()))
@@ -603,7 +609,7 @@ async def _async_try_hash(room_hash: str, source: str = "Network"):
 
 async def extract_identifiers_from_page(page) -> dict:
     """
-    Inspect browser tab DOM, URL, window globals, and localStorage
+    Inspect browser tab DOM, URL, window globals, referrer, cookies, and localStorage
     for game PINs, room hashes, or quiz IDs.
     """
     try:
@@ -617,35 +623,61 @@ async def extract_identifiers_from_page(page) -> dict:
                     info.pin = urlParams.get('gc');
                 }
 
-                // 2. Storage inspection
+                // 2. document.referrer check (e.g. redirected from https://wayground.com/join?gc=00355925)
+                if (!info.pin && document.referrer) {
+                    const mRef = document.referrer.match(/[?&]gc=(\\d{4,9})/);
+                    if (mRef) info.pin = mRef[1];
+                }
+
+                // 3. Performance navigation entries
+                if (!info.pin && window.performance && window.performance.getEntriesByType) {
+                    try {
+                        const entries = window.performance.getEntriesByType('navigation');
+                        for (const e of entries) {
+                            const mNav = (e.name || '').match(/[?&]gc=(\\d{4,9})/);
+                            if (mNav) {
+                                info.pin = mNav[1];
+                                break;
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                // 4. Cookies inspection
+                if (!info.pin && document.cookie) {
+                    const mCookie = document.cookie.match(/(?:^|;\\s*)(?:gc|roomCode|gameCode|pin)=([^;]+)/i);
+                    if (mCookie && /^\\d{4,9}$/.test(mCookie[1].trim())) {
+                        info.pin = mCookie[1].trim();
+                    }
+                }
+
+                // 5. Storage inspection
                 for (const store of [window.localStorage, window.sessionStorage]) {
                     if (!store) continue;
                     for (let i = 0; i < store.length; i++) {
-                        const k = store.key(i);
-                        const v = store.getItem(k);
+                        const k = store.key(i) || '';
+                        const v = store.getItem(k) || '';
                         if (!v || v.length > 500000) continue;
 
-                        const mPin = v.match(/["'](?:roomCode|gameCode|code)["']\\s*:\\s*["']?(\\d{5,8})["']?/i);
+                        // Check if key itself is the pin / game code
+                        if (/^(?:gc|pin|room_?code|game_?code|code)$/i.test(k) && /^\\d{4,9}$/.test(v.trim())) {
+                            if (!info.pin) info.pin = v.trim();
+                        }
+
+                        const mPin = v.match(/["']?(?:roomCode|gameCode|code|gc|pin)["']?\\s*[:=]\\s*["']?(\\d{4,9})["']?/i);
                         if (mPin && !info.pin) info.pin = mPin[1];
 
-                        const mHash = v.match(/["'](?:roomHash|hash)["']\\s*:\\s*["']([a-zA-Z0-9_-]{10,})["']/i);
+                        const mHash = v.match(/["']?(?:roomHash|hash)["']?\\s*[:=]\\s*["']([a-zA-Z0-9_-]{10,})["']/i);
                         if (mHash && !info.hash) info.hash = mHash[1];
 
-                        const mQid = v.match(/["']quizId["']\\s*:\\s*["']([a-fA-F0-9]{24})["']/i);
+                        const mQid = v.match(/["']?quizId["']?\\s*[:=]\\s*["']([a-fA-F0-9]{24})["']/i);
                         if (mQid && !info.quizId) info.quizId = mQid[1];
                     }
                 }
 
-                // 3. DOM text search for 6-digit game pin
-                const textNodes = document.evaluate(
-                    "//text()[contains(., 'Game Code') or contains(., 'Game PIN') or contains(., 'PIN')]",
-                    document, null, XPathResult.UNORDERED_NODE_SNAPSHOT_TYPE, null
-                );
-                for (let i = 0; i < textNodes.snapshotLength; i++) {
-                    const node = textNodes.snapshotItem(i);
-                    const m = (node.textContent || '').match(/\\b(\\d{6,8})\\b/);
-                    if (m && !info.pin) info.pin = m[1];
-                }
+                // 6. DOM text search for game pin
+                const mBody = document.body ? (document.body.innerText || '').match(/(?:Game\\s*(?:Code|PIN)|Код\\s*(?:гри|игры)|PIN)\\s*[:#]?\\s*(\\d{5,8})/i) : null;
+                if (mBody && !info.pin) info.pin = mBody[1];
 
                 return info;
             }
