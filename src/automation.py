@@ -29,6 +29,14 @@ except ImportError:
     PlaywrightTimeout = Exception
 
 
+def _get_active_ai_label() -> str:
+    """Return descriptive name of currently active AI engine."""
+    import config
+    if config.AI_GATEWAY_URL:
+        return "Smart Hybrid (Llama 3.3 70B)"
+    return config.AI_MODEL
+
+
 async def _safe_click(btn, description: str = "") -> bool:
     """Try to click a button; return True on success, False if element is stale/detached."""
     try:
@@ -647,7 +655,7 @@ async def automate_test(
 
     if ai_only or not answers_db:
         total_label = f"{total} questions detected" if total > 0 else "question count will be read dynamically"
-        log_info(f"🤖 Starting AI Solver ({AI_MODEL}) — {total_label}.")
+        log_info(f"🤖 Starting AI Solver ({_get_active_ai_label()}) — {total_label}.")
     else:
         log_info(f"Starting automation: {total} questions in test ({len(answers_db)} lookup keys loaded).")
     if wrong_count > 0 and total > 0:
@@ -793,7 +801,7 @@ async def automate_test(
             # If no DB answer found (or AI mode) and AI is enabled
             if not answers_to_fill and use_ai:
                 ai_source_note = "AI mode active" if (ai_only or not answers_db) else "No DB match"
-                log_step(f"🤖 {ai_source_note} — querying AI Solver ({AI_MODEL}) for missing term(s)...")
+                log_step(f"🤖 {ai_source_note} — querying AI Solver ({_get_active_ai_label()}) for missing term(s)...")
 
                 image_b64 = None
                 if question_image:
@@ -918,7 +926,7 @@ async def automate_test(
         # ── AI Solver: If no DB match (or pure AI mode) and AI is enabled ──
         if not correct_buttons and use_ai and buttons_info:
             ai_source_note = "AI mode active" if (ai_only or not answers_db) else "No DB match"
-            log_step(f"🤖 {ai_source_note} — querying AI Solver ({AI_MODEL})...")
+            log_step(f"🤖 {ai_source_note} — querying AI Solver ({_get_active_ai_label()})...")
 
             # Try to grab question image/diagram if present for multimodal analysis
             image_b64 = None

@@ -46,7 +46,8 @@ function jsonResponse(data, status = 200) {
 
 function extractJson(text) {
   if (!text) return null;
-  let clean = text.trim();
+  if (typeof text === "object") return text;
+  let clean = String(text).trim();
   clean = clean.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   try {
     return JSON.parse(clean);
@@ -94,8 +95,8 @@ async function runWorkersAI(env, messages, imageBase64 = null) {
     }
   }
 
-  // Text-only with flagship Llama 3.3 70B
-  const res = await env.AI.run("@cf/meta/llama-3.3-70b-instruct", {
+  // Text-only with flagship Llama 3.3 70B (FP8 Fast)
+  const res = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
     messages: messages,
     max_tokens: 768,
     temperature: 0.0
@@ -168,7 +169,7 @@ export default {
         status: "online",
         service: "wayground-ai-gateway",
         mode: "smart-hybrid",
-        primary_engine: "Cloudflare Workers AI (@cf/meta/llama-3.3-70b-instruct)",
+        primary_engine: "Cloudflare Workers AI (@cf/meta/llama-3.3-70b-instruct-fp8-fast)",
         fallback_engine: env.GROQ_API_KEY ? "Groq Cloud (qwen/qwen3.8-27b)" : "None configured"
       });
     }

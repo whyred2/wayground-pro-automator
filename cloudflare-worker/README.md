@@ -3,7 +3,7 @@
 Интеллектуальный шлюз между клиентом `Wayground Pro Automator` (`.exe`) и нейросетями.
 
 ## 🧠 Архитектура "Умный гибрид":
-1. **Основной движок (Primary):** **Cloudflare Workers AI** (`@cf/meta/llama-3.3-70b-instruct`).
+1. **Основной движок (Primary):** **Cloudflare Workers AI** (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`).
    - Бесплатно 10 000 Neurons в день прямо из коробки в Cloudflare.
    - Не требует никаких внешних API-ключей.
    - Поддержка распознавания картинок через `@cf/meta/llama-3.2-11b-vision-instruct`.

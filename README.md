@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v3.0</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v3.0.1</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Smart Hybrid AI Solver & Direct API Interception
     <br />
@@ -29,6 +29,7 @@
 
 ### Table of Contents
 
+- [What's New in v3.0.1](#whats-new-in-v301)
 - [What's New in v3.0](#whats-new-in-v30)
 - [What's New in v2.4](#whats-new-in-v24)
 - [What's New in v2.3](#whats-new-in-v23)
@@ -40,10 +41,16 @@
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
 
+### What's New in v3.0.1
+
+- **Cloudflare Workers AI Llama 3.3 70B Model Routing**: Corrected model routing to `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, enabling seamless, full-capacity execution of Meta Llama 3.3 70B directly on Cloudflare edge.
+- **Client Gateway Priority & Failover**: Configured the automator client to prioritize the Smart Hybrid Gateway by default, with automatic failover to local API keys if the gateway is ever offline.
+- **Transparent AI Provider Labeling**: Console logs now dynamically report the exact active AI engine (`Smart Hybrid (Llama 3.3 70B)`) and tag every answer with its source (`[Cloudflare Workers AI]` or `[Groq Cloud (Fallback)]`).
+
 ### What's New in v3.0
 
 - **Smart Hybrid AI Solver Gateway** — Full integration with Cloudflare Workers AI and Groq Cloud. Pure zero-config experience for `.exe` releases:
-  - **Cloudflare Workers AI (Primary)**: Solves questions autonomously using `@cf/meta/llama-3.3-70b-instruct` for complex reasoning and `@cf/meta/llama-3.2-11b-vision-instruct` for diagrams, geometry, and visual options.
+  - **Cloudflare Workers AI (Primary)**: Solves questions autonomously using `@cf/meta/llama-3.3-70b-instruct-fp8-fast` for complex reasoning and `@cf/meta/llama-3.2-11b-vision-instruct` for diagrams, geometry, and visual options.
   - **Groq Cloud (Fallback)**: Seamless failover to high-speed `qwen/qwen3.8-27b` if Cloudflare daily quotas are exceeded.
   - **100% Secure**: Zero hardcoded API keys in client binaries; all secret keys are protected behind the Cloudflare AI Gateway with IP-based rate limiting.
 - **Fill-in-the-Blank (FIB) & Keystroke Automation** — Native automated resolution for text blank questions. Automatically extracts context, consults AI for the exact missing terminology, fills inputs with synthetic keystrokes, and generates human-like mistakes when deliberate errors are configured.
@@ -201,6 +208,7 @@ The script reads the screen and matches the prompt.
 
 ### Содержание
 
+- [Что нового в v3.0.1](#что-нового-в-v301)
 - [Что нового в v3.0](#что-нового-в-v30)
 - [Что нового в v2.4](#что-нового-в-v24)
 - [Что нового в v2.3](#что-нового-в-v23)
@@ -213,10 +221,16 @@ The script reads the screen and matches the prompt.
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
 
+### Что нового в v3.0.1
+
+- **Исправление маршрутизации модели Llama 3.3 70B в Cloudflare Workers AI**: Указан точный идентификатор модели `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, что позволило нейросети решать задачи напрямую на edge-инфраструктуре Cloudflare без ошибок.
+- **Приоритет Smart Hybrid Gateway и авто-failover**: Клиент теперь по умолчанию обращается к шлюзу Cloudflare (Llama 3.3 70B), даже если в `.env` прописан локальный ключ, и автоматически переключается на прямой ключ Groq при недоступности шлюза.
+- **Прозрачные логи провайдера**: В консоли отображается активный движок (`Smart Hybrid (Llama 3.3 70B)`), а каждый ответ помечается источником (`[Cloudflare Workers AI]` или `[Groq Cloud (Fallback)]`).
+
 ### Что нового в v3.0
 
 - **Умный гибридный ИИ-шлюз (Smart Hybrid AI Gateway)** — Полная интеграция с Cloudflare Workers AI и Groq Cloud. Работа «из коробки» для пользователей `.exe` без необходимости регистрироваться на зарубежных сайтах или вводить ключи:
-  - **Cloudflare Workers AI (Основной):** Автономное решение тестов с помощью флагманской модели `@cf/meta/llama-3.3-70b-instruct` (70 млрд параметров) и мультимодальной `@cf/meta/llama-3.2-11b-vision-instruct` для вопросов с картинками, графиками и геометрией.
+  - **Cloudflare Workers AI (Основной):** Автономное решение тестов с помощью флагманской модели `@cf/meta/llama-3.3-70b-instruct-fp8-fast` (70 млрд параметров) и мультимодальной `@cf/meta/llama-3.2-11b-vision-instruct` для вопросов с картинками, графиками и геометрией.
   - **Groq Cloud (Резервный):** Автоматическое прозрачное переключение на скоростной Groq (`qwen/qwen3.8-27b`) при превышении дневных квот Cloudflare.
   - **100% безопасность:** Ключи скрыты за защищенным шлюзом Cloudflare с защитой от спама (Rate Limiter по IP).
 - **Автоматизация Fill-in-the-Blank (Ввод пропущенных слов)** — Распознавание текстовых пропусков, запрос точного ответа у нейросети, посимвольный ввод и генерация реалистичных человеческих ошибок при включенном режиме намеренных ошибок (`--wrong`).

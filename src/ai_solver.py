@@ -32,23 +32,26 @@ def test_ai_connection(
     base_url: str | None = None,
     gateway_url: str | None = None
 ) -> tuple[bool, str]:
-    """Verify connectivity and authentication with the AI API or Cloudflare Gateway."""
+    """Verify connectivity and authentication with Cloudflare Gateway or Direct AI API."""
     key = api_key or AI_API_KEY
     mdl = model or AI_MODEL
     url = base_url or AI_API_BASE
     gw = gateway_url or AI_GATEWAY_URL
 
-    if not key and gw:
+    if gw and not (api_key and model):
         try:
             req = urllib.request.Request(
                 f"{gw.rstrip('/')}/health",
-                headers={"User-Agent": "WaygroundProAutomator/3.0"}
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"}
             )
             with urllib.request.urlopen(req, timeout=6.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return True, f"Cloudflare Gateway online ({data.get('service', 'ok')})"
+                primary = data.get("primary_engine", "Cloudflare Workers AI")
+                return True, f"Smart Hybrid Gateway online ({primary})"
         except Exception as exc:
-            return False, f"Cloudflare Gateway unreachable: {exc}"
+            if not key:
+                return False, f"Cloudflare Gateway unreachable: {exc}"
+            log_error(f"Cloudflare Gateway unreachable ({exc}), checking direct API key...")
 
     if not key:
         return False, "API key is empty and no Gateway URL configured"
@@ -86,12 +89,14 @@ def _solve_via_gateway_mcq(
     req = urllib.request.Request(
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
-        reasoning = res_data.get("reasoning", "")
+        provider = res_data.get("provider", "Cloudflare Workers AI")
+        raw_reasoning = res_data.get("reasoning", "")
+        reasoning = f"[{provider}] {raw_reasoning}" if raw_reasoning else f"[{provider}]"
         indices = _parse_candidate_indices(
             res_data.get("selected_indices", [1]),
             len(options_info),
@@ -119,14 +124,16 @@ def _solve_via_gateway_fib(
     req = urllib.request.Request(
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
+        provider = res_data.get("provider", "Cloudflare Workers AI")
         ans = res_data.get("answers") or [res_data.get("answer", "answer")]
         wrongs = res_data.get("plausible_wrongs") or [res_data.get("plausible_wrong", "answers")]
-        reasoning = res_data.get("reasoning", "")
+        raw_reasoning = res_data.get("reasoning", "")
+        reasoning = f"[{provider}] {raw_reasoning}" if raw_reasoning else f"[{provider}]"
         return ans, wrongs, reasoning
 
 
@@ -271,27 +278,34 @@ def solve_question_with_ai(
     api_key: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    gateway_url: str | None = None,
     max_retries: int = 2,
 ) -> tuple[list[int], str]:
     """
-    Submit a question and its options to the AI model (qwen/qwen3.8-27b on Groq by default).
+    Submit a question and its options to the AI model.
+    Prioritizes Smart Hybrid Gateway (Cloudflare Workers AI Llama 3.3 70B -> Groq fallback),
+    with automatic failover to direct API key if gateway is offline.
     Returns (selected_0_based_indices, reasoning_string).
     """
     key = api_key or AI_API_KEY
     mdl = model or AI_MODEL
     url = base_url or AI_API_BASE
+    gw_url = gateway_url or AI_GATEWAY_URL
 
     total_options = len(options_info)
     if total_options == 0:
         return [], "No options available"
 
-    if not key and AI_GATEWAY_URL:
+    if gw_url and not (api_key and model):
         try:
-            return _solve_via_gateway_mcq(AI_GATEWAY_URL, question_text, options_info, is_msq, image_base64)
+            return _solve_via_gateway_mcq(gw_url, question_text, options_info, is_msq, image_base64)
         except Exception as exc:
             log_error(f"Cloudflare Gateway error: {exc}")
-            return [0], f"Gateway error: {exc}"
-    elif not key:
+            if key:
+                log_info("Falling back to direct AI key...")
+            else:
+                return [0], f"Gateway error: {exc}"
+    elif not key and not gw_url:
         raise ValueError("AI API key is not configured and AI_GATEWAY_URL is not set")
 
     formatted_options = _format_options_text(options_info)
@@ -499,24 +513,31 @@ def solve_fib_with_ai(
     api_key: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    gateway_url: str | None = None,
     max_retries: int = 2,
 ) -> tuple[list[str], list[str], str]:
     """
     Submit a Fill-in-the-Blank (FIB) question to the AI model.
+    Prioritizes Smart Hybrid Gateway (Cloudflare Workers AI Llama 3.3 70B -> Groq fallback),
+    with automatic failover to direct API key if gateway is offline.
     Returns (list_of_answers_per_blank, list_of_plausible_wrong_per_blank, reasoning_string).
     """
     key = api_key or AI_API_KEY
     mdl = model or AI_MODEL
     url = base_url or AI_API_BASE
+    gw_url = gateway_url or AI_GATEWAY_URL
 
-    if not key and AI_GATEWAY_URL:
+    if gw_url and not (api_key and model):
         try:
-            return _solve_via_gateway_fib(AI_GATEWAY_URL, question_text, num_blanks, image_base64)
+            return _solve_via_gateway_fib(gw_url, question_text, num_blanks, image_base64)
         except Exception as exc:
             log_error(f"Cloudflare Gateway FIB error: {exc}")
-            fallback_wrongs = [generate_plausible_wrong("answer")] * num_blanks
-            return ["answer"] * num_blanks, fallback_wrongs, f"Gateway error: {exc}"
-    elif not key:
+            if key:
+                log_info("Falling back to direct AI key for FIB...")
+            else:
+                fallback_wrongs = [generate_plausible_wrong("answer")] * num_blanks
+                return ["answer"] * num_blanks, fallback_wrongs, f"Gateway error: {exc}"
+    elif not key and not gw_url:
         raise ValueError("AI API key is not configured and AI_GATEWAY_URL is not set")
 
     q_stem = question_text.strip() if question_text else "[Question presented in image/media]"
