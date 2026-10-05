@@ -4,6 +4,8 @@ Configuration: constants, CSS selectors, timing parameters, and console colors.
 
 import os
 
+VERSION = "3.1.3"
+
 
 def _load_dotenv():
     """Lightweight loader for .env file in project root, avoiding mandatory external dependencies."""
@@ -30,8 +32,10 @@ _load_dotenv()
 # ─── AI Solver (OpenAI / Groq / Qwen / Cloudflare Gateway) ───
 AI_API_BASE = os.getenv("OPENAI_API_BASE", os.getenv("AI_API_BASE", "https://api.groq.com/openai/v1"))
 AI_API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", "")))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "qwen/qwen3.8-27b")
 AI_GATEWAY_URL = os.getenv("AI_GATEWAY_URL", "https://wayground-ai-gateway.dima74181.workers.dev").rstrip("/")
+AI_GATEWAY_MODEL = ""  # Empty selects the gateway's Smart Hybrid routing.
 AI_SOLVER_DEFAULT = True
 
 # Legacy Mistral fallback settings

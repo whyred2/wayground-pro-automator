@@ -33,6 +33,8 @@ def _get_active_ai_label() -> str:
     """Return descriptive name of currently active AI engine."""
     import config
     if config.AI_GATEWAY_URL:
+        if config.AI_GATEWAY_MODEL:
+            return f"{config.AI_GATEWAY_MODEL} via Gateway"
         return "Smart Hybrid (Llama 3.3 70B)"
     return config.AI_MODEL
 
@@ -377,13 +379,13 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
         except Exception:
             pass
 
-        # 3. Check for Redemption Question screen (второй шанс)
+        # 3. Check for Redemption Question screen (second chance)
         try:
             redemption_btns = await page.query_selector_all(SEL_REDEMPTION_BUTTON)
             if redemption_btns and len(redemption_btns) > 0:
                 first_btn = redemption_btns[0]
                 if await first_btn.is_visible():
-                    log_info("🔥 Redemption Question screen (Второй шанс) detected!")
+                    log_info("🔥 Redemption Question screen (second chance) detected!")
                     target_card = random.choice(redemption_btns)
                     log_step(f"Selecting redemption card (1 of {len(redemption_btns)})...")
                     await _safe_click(target_card, "redemption question card")
@@ -438,7 +440,7 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
 async def _read_question_counter(page) -> tuple[int, int]:
     """
     Read the current/total question numbers from the Wayground test page.
-    Supports classic data-cy spans and modern assessment counters ('Питання 1 з 50', 'Вопрос 1 из 50', etc.).
+    Supports classic data-cy spans and modern assessment counters in multiple languages.
     Returns (current, total). Returns (0, 0) if not found.
     """
     try:
@@ -453,7 +455,7 @@ async def _read_question_counter(page) -> tuple[int, int]:
                     if (!isNaN(c) && !isNaN(t) && t > 0) return [c, t];
                 }
 
-                // 2. Modern footer / text counters: "Питання 1 з 50", "Вопрос 1 из 50", "Question 1 of 50", "1 / 50"
+                // 2. Modern footer / text counters in multiple languages, such as "Question 1 of 50" or "1 / 50"
                 const elements = Array.from(document.querySelectorAll('footer, div, span, p')).filter(el => {
                     return el.children.length === 0 && /(?:питання|вопрос|question)?\\s*\\b(\\d+)\\s*(?:з|из|of|\\/)\\s*(\\d+)\\b/i.test(el.innerText || '');
                 });
@@ -478,7 +480,7 @@ async def _read_question_counter(page) -> tuple[int, int]:
 async def _advance_if_next_button(page) -> bool:
     """
     In modern assessment/test mode (and certain quiz shells), choosing an answer option
-    only selects the radio button or checkbox. A 'Next' / 'Submit' button ('Далі', 'Submit', etc.)
+    only selects the radio button or checkbox. A localized 'Next' / 'Submit' button
     must be clicked to actually submit the answer and transition to the next question.
     """
     try:
@@ -523,7 +525,7 @@ async def _advance_if_next_button(page) -> bool:
                         cy.includes('next') || cy.includes('submit')
                     );
 
-                    // Ensure it's not a 'Back' / 'Previous' / 'Назад' button
+                    // Ensure it is not a localized 'Back' / 'Previous' button
                     const isBack = /(?:назад|back|prev|previous)/i.test(text) ||
                                    /(?:назад|back|prev)/i.test(aria) ||
                                    testId.includes('prev') || testId.includes('back');
@@ -539,7 +541,7 @@ async def _advance_if_next_button(page) -> bool:
             el = btn_handle.as_element()
             if el and await el.is_visible():
                 btn_txt = (await el.inner_text()).strip().replace('\\n', ' ')
-                log_step(f"Clicking Next / Submit: \\\"{btn_txt or 'Далі'}\\\"...")
+                log_step(f"Clicking Next / Submit: \\\"{btn_txt or 'Next'}\\\"...")
                 clicked = await _safe_click(el, "next/submit navigation")
                 return clicked
     except Exception:
@@ -1054,7 +1056,7 @@ async def automate_test(
                 if not advanced:
                     submit_btn = await test_page.query_selector(SEL_SUBMIT_BUTTON)
                     if submit_btn:
-                        log_step("Clicking Submit (Отправить)...")
+                        log_step("Clicking Submit...")
                         if not await _safe_click(submit_btn, "MSQ submit"):
                             continue
                     else:
@@ -1178,7 +1180,7 @@ async def scrape_results(test_page, timeout: int = 30):
                     }
                 }
 
-                // Total questions (e.g. "30 питання", "30 questions", "30 вопросов")
+                // Total questions (e.g. "30 questions" and localized equivalents)
                 for (const el of allElements) {
                     const txt = (el.innerText || el.textContent || '').trim();
                     const m = txt.match(/^(\d+)\s*(?:питання|питань|запитання|запитань|вопрос|question)/i);
@@ -1303,21 +1305,21 @@ async def scrape_results(test_page, timeout: int = 30):
         if accuracy:
             acc_num = int(re.sub(r'[^0-9]', '', accuracy) or 0)
             acc_color = C_GREEN if acc_num >= 80 else (C_YELLOW if acc_num >= 50 else C_RED)
-            print(f"  {C_BOLD}Точність (Accuracy):{C_RESET}     {acc_color}{accuracy}{C_RESET}")
+            print(f"  {C_BOLD}Accuracy:{C_RESET}     {acc_color}{accuracy}{C_RESET}")
         if score:
-            print(f"  {C_BOLD}Бали (Points/Score):{C_RESET}     {C_CYAN}{score}{C_RESET}")
+            print(f"  {C_BOLD}Points / Score:{C_RESET}     {C_CYAN}{score}{C_RESET}")
         if total_qs:
-            print(f"  {C_BOLD}Всього питань (Total):{C_RESET}   {total_qs}")
+            print(f"  {C_BOLD}Total questions:{C_RESET}   {total_qs}")
         if correct:
-            print(f"  {C_GREEN}Правильно (Correct):{C_RESET}     {C_GREEN}{correct}{C_RESET}")
+            print(f"  {C_GREEN}Correct:{C_RESET}     {C_GREEN}{correct}{C_RESET}")
         if incorrect:
-            print(f"  {C_RED}Неправильно (Wrong):{C_RESET}     {C_RED}{incorrect}{C_RESET}")
+            print(f"  {C_RED}Incorrect:{C_RESET}     {C_RED}{incorrect}{C_RESET}")
         if ungraded:
-            print(f"  {C_CYAN}Ungraded (Без оцінки):{C_RESET}   {ungraded}")
+            print(f"  {C_CYAN}Ungraded:{C_RESET}   {ungraded}")
         if avg_time:
-            print(f"  {C_CYAN}Час/питання (Time):{C_RESET}      {avg_time}")
+            print(f"  {C_CYAN}Time per question:{C_RESET}      {avg_time}")
         if streak:
-            print(f"  {C_YELLOW}Серія (Streak):{C_RESET}          {streak}")
+            print(f"  {C_YELLOW}Streak:{C_RESET}          {streak}")
     else:
         log_step("Summary screen reached, but detailed stat badges could not be parsed.")
 

@@ -11,6 +11,8 @@
 const ipRateLimits = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_REQUESTS_PER_MINUTE = 30;
+const QWEN_MODEL = "qwen/qwen3.8-27b";
+const SELECTABLE_MODELS = new Set(["openai/gpt-oss-120b", "openai/gpt-oss-20b", QWEN_MODEL]);
 
 function checkRateLimit(ip) {
   const now = Date.now();
@@ -106,16 +108,16 @@ async function runWorkersAI(env, messages, imageBase64 = null) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 2. Groq Cloud Runner (Fallback)
+// 2. Groq Cloud Runner (primary for Qwen, fallback for other engines)
 // ─────────────────────────────────────────────────────────────
-async function runGroqFallback(apiKey, messages, imageBase64 = null) {
+async function runGroqAI(apiKey, messages, imageBase64 = null, model = "qwen/qwen3.8-27b") {
   if (!apiKey) {
-    throw new Error("GROQ_API_KEY secret is not configured for fallback");
+    throw new Error("GROQ_API_KEY secret is not configured");
   }
 
   let userContent = messages.find(m => m.role === "user")?.content || "";
   if (imageBase64) {
-    const dataUri = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,{imageBase64}`;
+    const dataUri = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}`;
     userContent = [
       { type: "text", text: userContent },
       { type: "image_url", image_url: { url: dataUri } }
@@ -131,13 +133,15 @@ async function runGroqFallback(apiKey, messages, imageBase64 = null) {
       "Authorization": `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: "qwen/qwen3.8-27b",
+      model,
       messages: [
         { role: "system", content: sysContent },
         { role: "user", content: userContent }
       ],
       response_format: { type: "json_object" },
-      max_tokens: 768,
+      max_tokens: SELECTABLE_MODELS.has(model) ? 2048 : 768,
+      ...(model === QWEN_MODEL ? { reasoning_effort: "low", reasoning_format: "hidden" } :
+        SELECTABLE_MODELS.has(model) ? { reasoning_effort: "low", include_reasoning: false } : {}),
       temperature: 0.0
     })
   });
@@ -149,6 +153,39 @@ async function runGroqFallback(apiKey, messages, imageBase64 = null) {
 
   const data = await groqResp.json();
   return data.choices?.[0]?.message?.content || "";
+}
+
+async function runSelectedModel(env, model, messages, imageBase64 = null) {
+  if (model === QWEN_MODEL) {
+    const rawOutput = await runGroqAI(env.GROQ_API_KEY, messages, imageBase64, model);
+    return { rawOutput, engineUsed: "Groq Cloud" };
+  }
+  let inputMessages = messages;
+  if (imageBase64) {
+    const dataUri = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+    inputMessages = messages.map(message => message.role === "user" ? {
+      role: "user",
+      content: [{ type: "text", text: message.content }, { type: "image_url", image_url: { url: dataUri } }],
+    } : message);
+  }
+  try {
+    if (!env.AI) throw new Error("Workers AI binding is not configured");
+    const result = await env.AI.run(`@cf/${model}`, {
+      messages: inputMessages,
+      max_tokens: 2048,
+      response_format: { type: "json_object" },
+      reasoning_effort: "low",
+    });
+    const rawOutput = result.response || result.choices?.[0]?.message?.content ||
+      result.output?.flatMap(item => item.content || [])
+        .filter(item => item.type === "output_text").map(item => item.text).join("") || "";
+    if (!extractJson(rawOutput)) throw new Error("Workers AI returned no valid JSON answer");
+    return { rawOutput, engineUsed: "Cloudflare Workers AI" };
+  } catch (error) {
+    if (!env.GROQ_API_KEY) throw error;
+    const rawOutput = await runGroqAI(env.GROQ_API_KEY, messages, imageBase64, model);
+    return { rawOutput, engineUsed: "Groq Cloud (Fallback)" };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -170,7 +207,9 @@ export default {
         service: "wayground-ai-gateway",
         mode: "smart-hybrid",
         primary_engine: "Cloudflare Workers AI (@cf/meta/llama-3.3-70b-instruct-fp8-fast)",
-        fallback_engine: env.GROQ_API_KEY ? "Groq Cloud (qwen/qwen3.8-27b)" : "None configured"
+        fallback_engine: env.GROQ_API_KEY ? "Groq Cloud (qwen/qwen3.8-27b)" : "None configured",
+        supported_models: [...SELECTABLE_MODELS],
+        qwen_provider: "Groq Cloud"
       });
     }
 
@@ -193,6 +232,13 @@ export default {
       // ─────────────────────────────────────────────────────────
       if (url.pathname === "/api/solve") {
         const body = await request.json();
+        const selectedModel = body.model || "";
+        if (selectedModel && !SELECTABLE_MODELS.has(selectedModel)) {
+          return jsonResponse({ error: "Unsupported model" }, 400);
+        }
+        if (selectedModel && selectedModel !== QWEN_MODEL && body.image_base64) {
+          return jsonResponse({ error: "Selected model supports text only" }, 400);
+        }
         const question = (body.question || "").trim();
         const options = Array.isArray(body.options) ? body.options : [];
         const isMsq = Boolean(body.is_msq);
@@ -239,26 +285,36 @@ export default {
         let rawOutput = "";
         let engineUsed = "Cloudflare Workers AI";
 
-        // Step 1: Attempt Primary Engine (Cloudflare Workers AI)
-        try {
-          rawOutput = await runWorkersAI(env, messages, imageBase64);
-        } catch (cfErr) {
-          console.warn("Workers AI primary failed, attempting Groq fallback:", cfErr.message);
+        if (selectedModel) {
+          ({ rawOutput, engineUsed } = await runSelectedModel(env, selectedModel, messages, imageBase64));
+        } else {
+          // Step 1: Attempt Primary Engine (Cloudflare Workers AI)
+          try {
+            rawOutput = await runWorkersAI(env, messages, imageBase64);
+          } catch (cfErr) {
+            console.warn("Workers AI primary failed, attempting Groq fallback:", cfErr.message);
 
-          // Step 2: Fallback Engine (Groq Cloud)
-          if (env.GROQ_API_KEY) {
-            rawOutput = await runGroqFallback(env.GROQ_API_KEY, messages, imageBase64);
-            engineUsed = "Groq Cloud (Fallback)";
-          } else {
-            throw cfErr;
+            // Step 2: Fallback Engine (Groq Cloud)
+            if (env.GROQ_API_KEY) {
+              rawOutput = await runGroqAI(env.GROQ_API_KEY, messages, imageBase64);
+              engineUsed = "Groq Cloud (Fallback)";
+            } else {
+              throw cfErr;
+            }
           }
         }
 
         let parsed = extractJson(rawOutput);
+        if (selectedModel && (!parsed || !Array.isArray(parsed.selected_indices) ||
+            !parsed.selected_indices.length || parsed.selected_indices.some(index =>
+              !Number.isInteger(index) || index < 1 || index > options.length))) {
+          throw new Error("Selected model returned an invalid answer");
+        }
         if (!parsed) {
           parsed = { reasoning: "Parsed from output", selected_indices: [1] };
         }
         parsed.provider = engineUsed;
+        if (selectedModel) parsed.model = selectedModel;
 
         return jsonResponse(parsed);
       }
@@ -268,6 +324,13 @@ export default {
       // ─────────────────────────────────────────────────────────
       if (url.pathname === "/api/solve-fib") {
         const body = await request.json();
+        const selectedModel = body.model || "";
+        if (selectedModel && !SELECTABLE_MODELS.has(selectedModel)) {
+          return jsonResponse({ error: "Unsupported model" }, 400);
+        }
+        if (selectedModel && selectedModel !== QWEN_MODEL && body.image_base64) {
+          return jsonResponse({ error: "Selected model supports text only" }, 400);
+        }
         const question = (body.question || "").trim();
         const numBlanks = Math.max(1, Math.min(Number(body.num_blanks) || 1, 5));
         const imageBase64 = body.image_base64 || null;
@@ -299,23 +362,31 @@ export default {
         let rawOutput = "";
         let engineUsed = "Cloudflare Workers AI";
 
-        try {
-          rawOutput = await runWorkersAI(env, messages, imageBase64);
-        } catch (cfErr) {
-          console.warn("Workers AI FIB primary failed, attempting Groq fallback:", cfErr.message);
-          if (env.GROQ_API_KEY) {
-            rawOutput = await runGroqFallback(env.GROQ_API_KEY, messages, imageBase64);
-            engineUsed = "Groq Cloud (Fallback)";
-          } else {
-            throw cfErr;
+        if (selectedModel) {
+          ({ rawOutput, engineUsed } = await runSelectedModel(env, selectedModel, messages, imageBase64));
+        } else {
+          try {
+            rawOutput = await runWorkersAI(env, messages, imageBase64);
+          } catch (cfErr) {
+            console.warn("Workers AI FIB primary failed, attempting Groq fallback:", cfErr.message);
+            if (env.GROQ_API_KEY) {
+              rawOutput = await runGroqAI(env.GROQ_API_KEY, messages, imageBase64);
+              engineUsed = "Groq Cloud (Fallback)";
+            } else {
+              throw cfErr;
+            }
           }
         }
 
         let parsed = extractJson(rawOutput);
+        if (selectedModel && (!parsed || !(parsed.answer || parsed.answers?.length))) {
+          throw new Error("Selected model returned an invalid answer");
+        }
         if (!parsed) {
           parsed = { answer: "answer", plausible_wrong: "answers", reasoning: "Fallback" };
         }
         parsed.provider = engineUsed;
+        if (selectedModel) parsed.model = selectedModel;
 
         return jsonResponse(parsed);
       }

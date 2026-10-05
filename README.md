@@ -151,9 +151,10 @@ _(Or just run the `.exe` file)_
 2. A Chromium browser window opens with Wayground.
 3. Log into your account and navigate to the test waiting room.
 4. Go back to the console and press **Enter**.
-5. The script intercepts the test API, loads answers, and shows you the total question count.
-6. Choose how many questions to answer wrong (or press Enter for 100%).
-7. Automation begins!
+5. Select the AI engine: Smart Hybrid (Cloudflare / Groq), your personal API, GPT-OSS 120B / 20B on Groq, or no AI. Each engine shows **Available / Unavailable** after a test request, with the reason if unavailable. The GPT-OSS presets are text-only and use `GROQ_API_KEY` (or the configured personal API key when its endpoint is Groq).
+6. The script intercepts the test API, loads answers, and shows you the total question count.
+7. Choose how many questions to answer wrong (or press Enter for 100%).
+8. Automation begins!
 
 ### CLI Parameters
 
@@ -162,6 +163,7 @@ You can skip the interactive menu by providing arguments directly:
 | Parameter                 | Description                                              | Default                                    |
 | ------------------------- | -------------------------------------------------------- | ------------------------------------------ |
 | `--ai`                    | Use AI solver exclusively (no database lookups)          | `False`                                    |
+| `--ai-provider ENGINE`    | Choose `gateway`, `direct`, `groq-120b`, `groq-20b`, or `off`; enabled engines are checked before starting | Interactive selection |
 | `--no-ai`                 | Disable AI solver and auto-fallback completely           | `False`                                    |
 | `--ai-key KEY`            | Custom API key for AI solver (OpenAI/Groq compatible)    | From `.env` / `OPENAI_API_KEY`             |
 | `--ai-model MODEL`        | Custom model for AI solver                               | `qwen/qwen3.8-27b`                         |
@@ -327,9 +329,10 @@ _(Или просто откройте файл `.exe`)_
 2. Откроется окно Chromium с сайтом Wayground.
 3. Авторизуйтесь под своим аккаунтом и перейдите на страницу ожидания теста.
 4. Вернитесь в консоль и нажмите **Enter**.
-5. Скрипт перехватит API, загрузит ответы и покажет общее количество вопросов.
-6. Укажите сколько вопросов ответить неправильно (или нажмите Enter для 100%).
-7. Автоматизация начнётся!
+5. Выберите ИИ: Smart Hybrid (Cloudflare / Groq), личный API, GPT-OSS 120B / 20B через Groq или «Без ИИ». Программа выполнит пробный запрос и покажет **Доступен / Недоступен** с причиной. Для личного API настройте ключ, модель и адрес в `.env` или аргументах запуска. GPT-OSS работают с текстом и используют `GROQ_API_KEY` (или ключ личного API, если его адрес указывает на Groq).
+6. Скрипт перехватит API, загрузит ответы и покажет общее количество вопросов.
+7. Укажите сколько вопросов ответить неправильно (или нажмите Enter для 100%).
+8. Автоматизация начнётся!
 
 ### Параметры запуска
 
@@ -338,6 +341,7 @@ _(Или просто откройте файл `.exe`)_
 | Параметр                 | Описание                                                | По умолчанию                               |
 | ------------------------ | ------------------------------------------------------- | ------------------------------------------ |
 | `--ai`                   | Решать тест напрямую через AI Solver (без поиска базы)  | `False`                                    |
+| `--ai-provider ENGINE`   | Выбрать `gateway`, `direct`, `groq-120b`, `groq-20b` или `off`; доступность ИИ проверяется перед стартом | Интерактивный выбор |
 | `--no-ai`                | Полностью отключить ИИ-солвер и авто-переключение на ИИ | `False`                                    |
 | `--ai-key KEY`           | Пользовательский API ключ (Groq / OpenAI)               | Из `.env` / `OPENAI_API_KEY`               |
 | `--ai-model MODEL`       | Модель для решения (Groq / OpenAI)                     | `qwen/qwen3.8-27b`                         |

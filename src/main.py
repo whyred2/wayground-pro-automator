@@ -70,7 +70,7 @@ from scraper import scrape_answers
 from automation import automate_test, scrape_results, _read_question_counter
 from tabs import get_live_pages, pick_tab
 from matching import get_display_questions
-from ai_solver import test_ai_connection
+from ai_setup import configure_ai
 
 
 # ─── Entry Point ───────────────────────────────────────────────
@@ -142,6 +142,12 @@ Modes:
         help="Disable AI solver fallback completely."
     )
     parser.add_argument(
+        "--ai-provider",
+        choices=("gateway", "direct", "groq-120b", "groq-20b", "off"),
+        default=None,
+        help="AI engine: gateway, direct, groq-120b, groq-20b, off. Prompts if omitted.",
+    )
+    parser.add_argument(
         "--ai-key", "--mistral-key",
         dest="ai_key",
         type=str,
@@ -163,6 +169,11 @@ Modes:
         help=f"Custom API base URL (default: {AI_API_BASE})."
     )
     args = parser.parse_args()
+
+    if args.ai and (args.no_ai or args.ai_provider == "off"):
+        parser.error("--ai cannot be combined with --no-ai or --ai-provider off")
+    if args.no_ai and args.ai_provider not in (None, "off"):
+        parser.error("--no-ai cannot be combined with an enabled --ai-provider")
 
     if args.ai_key:
         config.AI_API_KEY = args.ai_key
@@ -193,7 +204,7 @@ Modes:
         # Default to Mode 1 (Attach) for maximum persistence and login retention
         args.attach = (mode.strip() != '2')
 
-        engine_label = "Smart Hybrid [Llama 3.3 70B]" if config.AI_GATEWAY_URL else config.AI_MODEL
+        engine_label = "AI selected before the test"
         print()
         print(f"  {C_BOLD}Solver Mode:{C_RESET}")
         print(f"  {C_CYAN}1{C_RESET}) Auto ({C_GREEN}Direct API -> CheatNetwork -> AI Fallback [{engine_label}]{C_RESET}) [Recommended]")
@@ -205,7 +216,7 @@ Modes:
         sc = solver_choice.strip()
         if sc == "2":
             args.ai = True
-            log_step(f"AI Solver active ({engine_label}).")
+            log_step("AI-only mode selected. The AI engine will be checked before the test.")
         elif sc == "3":
             args.no_ai = True
             log_step("AI solver disabled. Using database only.")
@@ -533,6 +544,8 @@ async def _run_phases(page_test, browser, args):
     # ── Clear screen for Phase 1 ──
     clear_screen()
     print_banner("Working...")
+    if not await configure_ai(args):
+        sys.exit(1)
     print_phase_header(1, "Retrieving answer keys")
     
     answers_db = None
@@ -544,7 +557,7 @@ async def _run_phases(page_test, browser, args):
         if not has_key:
             log_error("Cannot use AI mode without an API key or Gateway URL. Configure .env or pass --ai-key.")
             sys.exit(1)
-        source_label = "Smart Hybrid Gateway (Llama 3.3 70B)" if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
+        source_label = (f"{config.AI_GATEWAY_MODEL} via Gateway" if config.AI_GATEWAY_MODEL else "Smart Hybrid Gateway (Llama 3.3 70B)") if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
         answer_source = source_label
         answers_db = {}
         log_info(f"🤖 Real-time AI mode active [{source_label}]")
@@ -652,7 +665,7 @@ async def _run_phases(page_test, browser, args):
                     log_step(f"{C_YELLOW}Could not retrieve answers from API or CheatNetwork.{C_RESET}")
                     has_key = await _ensure_ai_key()
                     if has_key:
-                        source_label = "Smart Hybrid Gateway (Llama 3.3 70B)" if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
+                        source_label = (f"{config.AI_GATEWAY_MODEL} via Gateway" if config.AI_GATEWAY_MODEL else "Smart Hybrid Gateway (Llama 3.3 70B)") if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
                         log_info(f"🤖 Automatically switching to {source_label}...")
                         answers_db = {}
                         answer_source = source_label
@@ -679,7 +692,7 @@ async def _run_phases(page_test, browser, args):
             print(f"{C_DIM}{i+1:<4}{C_RESET} {q_short:<55} {C_GREEN}{a_short:<35}{C_RESET}")
         print()
     else:
-        active_ai = "Smart Hybrid Gateway (Llama 3.3 70B)" if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
+        active_ai = (f"{config.AI_GATEWAY_MODEL} via Gateway" if config.AI_GATEWAY_MODEL else "Smart Hybrid Gateway (Llama 3.3 70B)") if config.AI_GATEWAY_URL else f"AI Solver ({config.AI_MODEL})"
         print(f"\n{C_CYAN}🤖 Solver: {active_ai}{C_RESET}")
         print(f"  {C_DIM}Questions will be solved in real-time as they appear on screen.{C_RESET}\n")
 

@@ -12,14 +12,22 @@ import random
 import urllib.request
 from openai import OpenAI
 
-from config import AI_API_BASE, AI_API_KEY, AI_MODEL, AI_GATEWAY_URL
+import config
 from ui import log_info, log_step, log_error
+
+
+def _completion_options(model: str, max_tokens: int) -> dict:
+    """Reserve tokens for GPT-OSS reasoning as well as the final JSON answer."""
+    if model in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+        return {"max_tokens": max(2048, max_tokens),
+                "extra_body": {"reasoning_effort": "low", "include_reasoning": False}}
+    return {"max_tokens": max_tokens}
 
 
 def get_ai_client(api_key: str | None = None, base_url: str | None = None) -> OpenAI:
     """Instantiate OpenAI client configured with the specified or default base_url and api_key."""
-    key = api_key or AI_API_KEY
-    url = base_url or AI_API_BASE
+    key = config.AI_API_KEY if api_key is None else api_key
+    url = config.AI_API_BASE if base_url is None else base_url
     return OpenAI(
         api_key=key,
         base_url=url,
@@ -33,21 +41,30 @@ def test_ai_connection(
     gateway_url: str | None = None
 ) -> tuple[bool, str]:
     """Verify connectivity and authentication with Cloudflare Gateway or Direct AI API."""
-    key = api_key or AI_API_KEY
-    mdl = model or AI_MODEL
-    url = base_url or AI_API_BASE
-    gw = gateway_url or AI_GATEWAY_URL
+    key = config.AI_API_KEY if api_key is None else api_key
+    mdl = config.AI_MODEL if model is None else model
+    url = config.AI_API_BASE if base_url is None else base_url
+    gw = config.AI_GATEWAY_URL if gateway_url is None else gateway_url
 
     if gw and not (api_key and model):
         try:
             req = urllib.request.Request(
-                f"{gw.rstrip('/')}/health",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"}
+                f"{gw.rstrip('/')}/api/solve",
+                data=json.dumps({"question": "What is 1 + 1?", "options": ["2", "3"],
+                                 "model": model or ""}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": f"WaygroundProAutomator/{config.VERSION}"},
+                method="POST",
             )
-            with urllib.request.urlopen(req, timeout=6.0) as resp:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                primary = data.get("primary_engine", "Cloudflare Workers AI")
-                return True, f"Smart Hybrid Gateway online ({primary})"
+                if not isinstance(data, dict) or data.get("selected_indices") != [1]:
+                    raise ValueError("Gateway did not return a valid test answer")
+                if model and data.get("model") != model:
+                    return False, "Gateway needs an update to support model selection"
+                provider = data.get("provider", "Cloudflare Workers AI")
+                if model == "qwen/qwen3.8-27b" and not provider.startswith("Groq"):
+                    return False, "Gateway needs an update to route Qwen through Groq"
+                return True, f"Test answer received ({provider})"
         except Exception as exc:
             if not key:
                 return False, f"Cloudflare Gateway unreachable: {exc}"
@@ -57,11 +74,11 @@ def test_ai_connection(
         return False, "API key is empty and no Gateway URL configured"
 
     try:
-        client = get_ai_client(api_key=key, base_url=url)
+        client = get_ai_client(api_key=key, base_url=url).with_options(timeout=10.0, max_retries=0)
         resp = client.chat.completions.create(
             model=mdl,
             messages=[{"role": "user", "content": "ping"}],
-            max_tokens=5,
+            **_completion_options(mdl, 5),
         )
         if resp and resp.choices:
             return True, "Connection successful"
@@ -84,17 +101,22 @@ def _solve_via_gateway_mcq(
         "options": options_info,
         "is_msq": is_msq,
         "image_base64": image_base64,
+        "model": config.AI_GATEWAY_MODEL,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"},
+        headers={"Content-Type": "application/json", "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/{config.VERSION}"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
+        if config.AI_GATEWAY_MODEL and res_data.get("model") != config.AI_GATEWAY_MODEL:
+            raise ValueError("Gateway returned a different model than selected")
         provider = res_data.get("provider", "Cloudflare Workers AI")
+        if config.AI_GATEWAY_MODEL == "qwen/qwen3.8-27b" and not provider.startswith("Groq"):
+            raise ValueError("Qwen must be served by Groq")
         raw_reasoning = res_data.get("reasoning", "")
         reasoning = f"[{provider}] {raw_reasoning}" if raw_reasoning else f"[{provider}]"
         indices = _parse_candidate_indices(
@@ -119,17 +141,22 @@ def _solve_via_gateway_fib(
         "question": question_text,
         "num_blanks": num_blanks,
         "image_base64": image_base64,
+        "model": config.AI_GATEWAY_MODEL,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/3.0.1"},
+        headers={"Content-Type": "application/json", "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaygroundProAutomator/{config.VERSION}"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
+        if config.AI_GATEWAY_MODEL and res_data.get("model") != config.AI_GATEWAY_MODEL:
+            raise ValueError("Gateway returned a different model than selected")
         provider = res_data.get("provider", "Cloudflare Workers AI")
+        if config.AI_GATEWAY_MODEL == "qwen/qwen3.8-27b" and not provider.startswith("Groq"):
+            raise ValueError("Qwen must be served by Groq")
         ans = res_data.get("answers") or [res_data.get("answer", "answer")]
         wrongs = res_data.get("plausible_wrongs") or [res_data.get("plausible_wrong", "answers")]
         raw_reasoning = res_data.get("reasoning", "")
@@ -287,10 +314,10 @@ def solve_question_with_ai(
     with automatic failover to direct API key if gateway is offline.
     Returns (selected_0_based_indices, reasoning_string).
     """
-    key = api_key or AI_API_KEY
-    mdl = model or AI_MODEL
-    url = base_url or AI_API_BASE
-    gw_url = gateway_url or AI_GATEWAY_URL
+    key = config.AI_API_KEY if api_key is None else api_key
+    mdl = config.AI_MODEL if model is None else model
+    url = config.AI_API_BASE if base_url is None else base_url
+    gw_url = config.AI_GATEWAY_URL if gateway_url is None else gateway_url
 
     total_options = len(options_info)
     if total_options == 0:
@@ -358,7 +385,7 @@ def solve_question_with_ai(
                     {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=768,
+                **_completion_options(mdl, 768),
                 temperature=0.0,
             )
             choices = resp.choices or []
@@ -522,10 +549,10 @@ def solve_fib_with_ai(
     with automatic failover to direct API key if gateway is offline.
     Returns (list_of_answers_per_blank, list_of_plausible_wrong_per_blank, reasoning_string).
     """
-    key = api_key or AI_API_KEY
-    mdl = model or AI_MODEL
-    url = base_url or AI_API_BASE
-    gw_url = gateway_url or AI_GATEWAY_URL
+    key = config.AI_API_KEY if api_key is None else api_key
+    mdl = config.AI_MODEL if model is None else model
+    url = config.AI_API_BASE if base_url is None else base_url
+    gw_url = config.AI_GATEWAY_URL if gateway_url is None else gateway_url
 
     if gw_url and not (api_key and model):
         try:
@@ -591,7 +618,7 @@ def solve_fib_with_ai(
                     {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=512,
+                **_completion_options(mdl, 512),
                 temperature=0.0,
             )
             choices = resp.choices or []

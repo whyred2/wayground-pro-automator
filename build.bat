@@ -11,14 +11,23 @@ if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
     set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 )
 
+set "BUILD_PYTHON=python"
+if exist ".venv\Scripts\python.exe" set "BUILD_PYTHON=%CD%\.venv\Scripts\python.exe"
+
 echo [1/3] Checking dependencies...
-python -m pip install -r requirements.txt pyinstaller
+"%BUILD_PYTHON%" -m pip install -r requirements.txt pyinstaller
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Dependency installation failed!
+    pause
+    exit /b 1
+)
 
 echo.
 echo [2/3] Compiling with PyInstaller...
-pyinstaller --noconfirm --onefile --clean ^
+"%BUILD_PYTHON%" -m PyInstaller --noconfirm --onefile --clean ^
   --name "WaygroundAutomator" ^
   --icon "assets/icon.ico" ^
+  --version-file "assets/version_info.txt" ^
   --collect-data playwright_stealth ^
   --paths "src" ^
   src/main.py
