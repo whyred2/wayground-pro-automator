@@ -4,7 +4,7 @@ Configuration: constants, CSS selectors, timing parameters, and console colors.
 
 import os
 
-VERSION = "3.1.3"
+VERSION = "3.2"
 
 
 def _load_dotenv():

@@ -6,6 +6,7 @@ Supports text, math, multi-language, Fill-in-the-Blank, and vision/image questio
 """
 
 import json
+import math
 import re
 import time
 import random
@@ -119,13 +120,9 @@ def _solve_via_gateway_mcq(
             raise ValueError("Qwen must be served by Groq")
         raw_reasoning = res_data.get("reasoning", "")
         reasoning = f"[{provider}] {raw_reasoning}" if raw_reasoning else f"[{provider}]"
-        indices = _parse_candidate_indices(
-            res_data.get("selected_indices", [1]),
-            len(options_info),
-            options_info
-        )
-        if not indices and options_info:
-            indices = [0]
+        indices, _ = _parse_ai_response(json.dumps(res_data), len(options_info), is_msq, options_info)
+        if not indices:
+            raise ValueError("Gateway did not return valid answer indices")
         return indices, reasoning
 
 
@@ -157,8 +154,9 @@ def _solve_via_gateway_fib(
         provider = res_data.get("provider", "Cloudflare Workers AI")
         if config.AI_GATEWAY_MODEL == "qwen/qwen3.8-27b" and not provider.startswith("Groq"):
             raise ValueError("Qwen must be served by Groq")
-        ans = res_data.get("answers") or [res_data.get("answer", "answer")]
-        wrongs = res_data.get("plausible_wrongs") or [res_data.get("plausible_wrong", "answers")]
+        ans, wrongs, _ = _parse_fib_response(json.dumps(res_data), num_blanks)
+        if not ans:
+            raise ValueError("Gateway did not return an answer for every blank")
         raw_reasoning = res_data.get("reasoning", "")
         reasoning = f"[{provider}] {raw_reasoning}" if raw_reasoning else f"[{provider}]"
         return ans, wrongs, reasoning
@@ -196,33 +194,41 @@ def _parse_candidate_indices(val, total_options: int, options_info: list[dict] |
     }
 
     for item in items:
+        parsed = None
+        if isinstance(item, bool):
+            return []
         if isinstance(item, int):
             if 1 <= item <= total_options:
-                indices.append(item - 1)
+                parsed = item - 1
             elif item == 0 and total_options > 0:
-                indices.append(0)
+                parsed = 0
         elif isinstance(item, str):
             clean = item.strip()
             # 1. Pure digits
             if clean.isdigit():
                 num = int(clean)
                 if 1 <= num <= total_options:
-                    indices.append(num - 1)
+                    parsed = num - 1
                 elif num == 0 and total_options > 0:
-                    indices.append(0)
+                    parsed = 0
             # 2. Letter option (A, B, C, D...)
             elif clean.lower() in letter_map:
                 l_idx = letter_map[clean.lower()]
                 if l_idx < total_options:
-                    indices.append(l_idx)
+                    parsed = l_idx
             # 3. Match against option text
             elif options_info:
                 clean_low = clean.lower()
+                matches = []
                 for o_idx, opt in enumerate(options_info):
                     opt_text = (opt.get("text") or opt.get("alt") or "").strip().lower()
-                    if clean_low and (clean_low == opt_text or clean_low in opt_text or opt_text in clean_low):
-                        indices.append(o_idx)
-                        break
+                    if clean_low and opt_text and clean_low == opt_text:
+                        matches.append(o_idx)
+                if len(matches) == 1:
+                    parsed = matches[0]
+        if parsed is None:
+            return []
+        indices.append(parsed)
 
     return indices
 
@@ -240,8 +246,10 @@ def _parse_ai_response(raw_text: str, total_options: int, is_msq: bool, options_
     reasoning = ""
     selected_indices: list[int] = []
 
+    parsed_json = False
     try:
         data = json.loads(cleaned)
+        parsed_json = True
         if isinstance(data, dict):
             reasoning = data.get("reasoning") or data.get("explanation") or data.get("rationale") or ""
             # Check potential keys for selected indices
@@ -258,24 +266,24 @@ def _parse_ai_response(raw_text: str, total_options: int, is_msq: bool, options_
                         break
         elif isinstance(data, list):
             selected_indices.extend(_parse_candidate_indices(data, total_options, options_info))
+        elif isinstance(data, (str, int)) and not isinstance(data, bool):
+            selected_indices.extend(_parse_candidate_indices(data, total_options, options_info))
     except Exception:
         pass
 
-    # Regex fallback if JSON was malformed or missing expected keys
-    if not selected_indices:
-        # Check for letter matches e.g. "Option A" or "Answer: B" or "Choice C"
-        letter_match = re.findall(r"(?:option|choice|answer|вариант|відповідь)?\s*[:#]?\s*\b([A-Ha-hА-Еа-е])\b", raw_text)
-        if letter_match:
-            selected_indices.extend(_parse_candidate_indices(letter_match, total_options, options_info))
-
-        if not selected_indices:
-            matches = re.findall(r"\b(\d+)\b", raw_text)
-            for m in matches:
-                val = int(m)
-                if 1 <= val <= total_options:
-                    selected_indices.append(val - 1)
-                    if not is_msq:
-                        break
+    # Only accept an explicit plain choice; explanation numbers are not selections.
+    if not selected_indices and not parsed_json:
+        explicit = re.fullmatch(
+            r"(?:(?:option|choice|answer|вариант|відповідь)\s*[:#]?\s*)?"
+            r"([A-Ha-hА-Еа-е]|\d+)(?:\s*[,;]\s*([A-Ha-hА-Еа-е]|\d+))*\s*[.!]?",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if explicit:
+            choices = re.findall(r"[A-Ha-hА-Еа-е]|\d+", re.sub(
+                r"^(?:option|choice|answer|вариант|відповідь)\s*[:#]?\s*", "", cleaned, flags=re.IGNORECASE
+            ))
+            selected_indices.extend(_parse_candidate_indices(choices, total_options, options_info))
 
     # Filter bounds
     valid = [idx for idx in selected_indices if 0 <= idx < total_options]
@@ -288,13 +296,9 @@ def _parse_ai_response(raw_text: str, total_options: int, is_msq: bool, options_
             seen.add(idx)
             final_indices.append(idx)
 
-    # Fallback to option 0 if nothing matched
-    if not final_indices and total_options > 0:
-        final_indices = [0]
-        if not reasoning:
-            reasoning = "Fallback selection"
-
-    return final_indices, reasoning.strip()
+    if not is_msq and len(final_indices) != 1:
+        final_indices = []
+    return final_indices, reasoning.strip() if isinstance(reasoning, str) else ""
 
 
 def solve_question_with_ai(
@@ -331,9 +335,9 @@ def solve_question_with_ai(
             if key:
                 log_info("Falling back to direct AI key...")
             else:
-                return [0], f"Gateway error: {exc}"
+                return [], f"Gateway error: {exc}"
     elif not key and not gw_url:
-        raise ValueError("AI API key is not configured and AI_GATEWAY_URL is not set")
+        return [], "AI API key is not configured and AI_GATEWAY_URL is not set"
 
     formatted_options = _format_options_text(options_info)
 
@@ -373,7 +377,10 @@ def solve_question_with_ai(
     else:
         user_content = prompt
 
-    client = get_ai_client(api_key=key, base_url=url)
+    try:
+        client = get_ai_client(api_key=key, base_url=url)
+    except Exception as exc:
+        return [], f"AI client error: {exc}"
     last_exc = None
 
     for attempt in range(max_retries + 1):
@@ -390,7 +397,7 @@ def solve_question_with_ai(
             )
             choices = resp.choices or []
             if not choices:
-                return [0], "No choices returned by AI API"
+                return [], "No choices returned by AI API"
             raw_content = choices[0].message.content or ""
             return _parse_ai_response(raw_content, total_options, is_msq, options_info)
 
@@ -405,7 +412,7 @@ def solve_question_with_ai(
                     try:
                         salvaged_text = m_gen.group(1).encode().decode('unicode-escape', errors='replace')
                         salvaged_idx, salvaged_r = _parse_ai_response(salvaged_text, total_options, is_msq, options_info)
-                        if salvaged_idx and salvaged_idx != [0]:
+                        if salvaged_idx:
                             return salvaged_idx, f"Salvaged: {salvaged_r}"
                     except Exception:
                         pass
@@ -422,7 +429,7 @@ def solve_question_with_ai(
             break
 
     log_error(f"AI solver failed after {max_retries + 1} attempt(s): {last_exc}")
-    return [0], f"Error: {last_exc}"
+    return [], f"Error: {last_exc}"
 
 
 def generate_plausible_wrong(correct_word: str) -> str:
@@ -470,6 +477,25 @@ def generate_plausible_wrong(correct_word: str) -> str:
         return word + "s"
 
 
+def _parse_fib_values(value) -> list[str]:
+    """Keep explicit text/number answers without stringifying nulls or objects."""
+    values = value if isinstance(value, list) else [value]
+    result = []
+    for item in values:
+        if isinstance(item, str):
+            answer = item.strip()
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if isinstance(item, float) and not math.isfinite(item):
+                return []
+            answer = str(item)
+        else:
+            return []
+        if not answer:
+            return []
+        result.append(answer)
+    return result
+
+
 def _parse_fib_response(raw_text: str, num_blanks: int = 1) -> tuple[list[str], list[str], str]:
     """Parse AI output for fill-in-the-blank questions into list of answers, plausible wrongs, and reasoning."""
     cleaned = raw_text.strip()
@@ -488,49 +514,30 @@ def _parse_fib_response(raw_text: str, num_blanks: int = 1) -> tuple[list[str], 
             for candidate in ["answers", "answer", "words", "word", "blanks", "blank", "text", "term"]:
                 val = data.get(candidate)
                 if val is not None:
-                    if isinstance(val, list):
-                        answers = [str(x).strip() for x in val if str(x).strip()]
-                    elif isinstance(val, str) and val.strip():
-                        answers = [val.strip()]
-                    elif isinstance(val, (int, float)):
-                        answers = [str(val)]
+                    answers = _parse_fib_values(val)
                     if answers:
                         break
 
             for candidate_w in ["plausible_wrongs", "plausible_wrong", "wrong_answers", "wrong_answer", "distractors", "distractor"]:
                 val_w = data.get(candidate_w)
                 if val_w is not None:
-                    if isinstance(val_w, list):
-                        plausible_wrongs = [str(x).strip() for x in val_w if str(x).strip()]
-                    elif isinstance(val_w, str) and val_w.strip():
-                        plausible_wrongs = [val_w.strip()]
+                    plausible_wrongs = _parse_fib_values(val_w)
                     if plausible_wrongs:
                         break
 
-        elif isinstance(data, list):
-            answers = [str(x).strip() for x in data if str(x).strip()]
+        elif isinstance(data, (list, str, int, float)) and not isinstance(data, bool):
+            answers = _parse_fib_values(data)
     except Exception:
         pass
 
-    if not answers:
-        m = re.search(r'"(?:answer|word|term)"\s*:\s*"([^"]+)"', raw_text, re.IGNORECASE)
-        if m:
-            answers = [m.group(1).strip()]
-        else:
-            first_line = cleaned.split("\n")[0].strip().strip('"\'')
-            if first_line and len(first_line) < 80:
-                answers = [first_line]
-            else:
-                answers = ["answer"]
-
-    while len(answers) < num_blanks:
-        answers.append(answers[0] if answers else "answer")
+    if num_blanks < 1 or len(answers) != num_blanks:
+        return [], [], reasoning.strip() if isinstance(reasoning, str) else ""
 
     while len(plausible_wrongs) < len(answers):
         target_ans = answers[len(plausible_wrongs)]
         plausible_wrongs.append(generate_plausible_wrong(target_ans))
 
-    return answers[:num_blanks], plausible_wrongs[:num_blanks], reasoning.strip()
+    return answers, plausible_wrongs[:num_blanks], reasoning.strip() if isinstance(reasoning, str) else ""
 
 
 def solve_fib_with_ai(
@@ -562,10 +569,9 @@ def solve_fib_with_ai(
             if key:
                 log_info("Falling back to direct AI key for FIB...")
             else:
-                fallback_wrongs = [generate_plausible_wrong("answer")] * num_blanks
-                return ["answer"] * num_blanks, fallback_wrongs, f"Gateway error: {exc}"
+                return [], [], f"Gateway error: {exc}"
     elif not key and not gw_url:
-        raise ValueError("AI API key is not configured and AI_GATEWAY_URL is not set")
+        return [], [], "AI API key is not configured and AI_GATEWAY_URL is not set"
 
     q_stem = question_text.strip() if question_text else "[Question presented in image/media]"
 
@@ -606,7 +612,10 @@ def solve_fib_with_ai(
     else:
         user_content = prompt
 
-    client = get_ai_client(api_key=key, base_url=url)
+    try:
+        client = get_ai_client(api_key=key, base_url=url)
+    except Exception as exc:
+        return [], [], f"AI client error: {exc}"
     last_exc = None
 
     for attempt in range(max_retries + 1):
@@ -623,7 +632,7 @@ def solve_fib_with_ai(
             )
             choices = resp.choices or []
             if not choices:
-                return ["answer"] * num_blanks, ["answers"] * num_blanks, "No choices returned by AI API"
+                return [], [], "No choices returned by AI API"
             raw_content = choices[0].message.content or ""
             return _parse_fib_response(raw_content, num_blanks)
 
@@ -642,5 +651,4 @@ def solve_fib_with_ai(
             break
 
     log_error(f"AI FIB solver failed after {max_retries + 1} attempt(s): {last_exc}")
-    fallback_wrongs = [generate_plausible_wrong("answer")] * num_blanks
-    return ["answer"] * num_blanks, fallback_wrongs, f"Error: {last_exc}"
+    return [], [], f"Error: {last_exc}"

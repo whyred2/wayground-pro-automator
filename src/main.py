@@ -63,14 +63,19 @@ from api import (
     retrieve_answers,
     fetch_answers_by_any_identifier,
     set_allow_quizit_bot,
+    is_quizit_bot_allowed,
+    is_quizit_sign_in_required,
     get_discovered_pin,
     extract_identifiers_from_page,
+    reset_answer_state,
 )
 from scraper import scrape_answers
 from automation import automate_test, scrape_results, _read_question_counter
 from tabs import get_live_pages, pick_tab
 from matching import get_display_questions
 from ai_setup import configure_ai
+from quizit import fetch_quizit_browser_answers, resolve_quizit_pin
+from answer_tabs import select_existing_answer_tab, retrieve_cheatnetwork_answers
 
 
 # ─── Entry Point ───────────────────────────────────────────────
@@ -231,9 +236,9 @@ Modes:
             args.quiz_input = quiz_input_raw.strip() if quiz_input_raw.strip() else None
 
             print()
-            print(f"  {C_BOLD}Use Quizit Solver Bot for live PINs?{C_RESET}")
-            print(f"  {C_DIM}Note: Quizit Bot connects as a guest ('Reconnecting...') to fetch answers.{C_RESET}")
-            print(f"  {C_DIM}Select 'n' if teacher is actively watching the lobby.{C_RESET}")
+            print(f"  {C_BOLD}Use Quizit Standard as an optional fallback?{C_RESET}")
+            print(f"  {C_DIM}Requires a free Quizit account; a bot may join the game.{C_RESET}")
+            print(f"  {C_DIM}It is used only if direct answer keys are unavailable.{C_RESET}")
             bot_choice = await asyncio.get_event_loop().run_in_executor(
                 None, input, "  Allow Quizit Bot? [Y/n, default: Y]: "
             )
@@ -266,9 +271,6 @@ Modes:
 
             try:
                 browser = await p.chromium.connect_over_cdp(cdp_url)
-                # ── Attach network listener for API Data ──
-                for ctx in browser.contexts:
-                    ctx.on("response", intercept_response)
             except Exception as e:
                 log_error(f"Could not connect on port {port}!")
                 print(f"  {C_DIM}Error: {e}{C_RESET}")
@@ -282,12 +284,6 @@ Modes:
             if not has_wayground:
                 log_info("Wayground tab not found. Opening it for you...")
                 ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-                
-                # Make sure the listener is attached to this context
-                try:
-                    ctx.on("response", intercept_response)
-                except Exception:
-                    pass
                 
                 # Reuse empty/newtab page if available instead of opening a duplicate tab
                 page_test = None
@@ -320,6 +316,10 @@ Modes:
             all_pages = await get_live_pages(browser)
             log_info(f"Found {len(all_pages)} open tab(s).")
             page_test = await pick_tab(all_pages, "🎯 TEST (Wayground)", "wayground")
+            if page_test is None:
+                log_error("No open test tab is available. Reopen the test and run the program again.")
+                return
+            reset_answer_state()
             try:
                 page_test.on("response", intercept_response)
             except Exception:
@@ -328,7 +328,8 @@ Modes:
             print()
 
             # Run phases
-            await _run_phases(page_test, browser, args)
+            if await _run_phases(page_test, browser, args) is False:
+                return
 
             print()
             log_info("Done! 🎉  (Browser left open — use --attach again for the next test)")
@@ -385,8 +386,9 @@ Modes:
                 viewport={"width": 1280, "height": 900},
                 user_agent=UA,
             )
-            ctx_test.on("response", intercept_response)
             page_test = await ctx_test.new_page()
+            reset_answer_state()
+            page_test.on("response", intercept_response)
             await apply_stealth(page_test)
 
             # Determine initial test URL based on user input
@@ -417,7 +419,8 @@ Modes:
             )
             print()
 
-            await _run_phases(page_test, browser, args)
+            if await _run_phases(page_test, browser, args) is False:
+                return
 
             print()
             print(f"{C_YELLOW}{'─'*60}{C_RESET}")
@@ -541,6 +544,10 @@ async def _ensure_ai_key() -> bool:
 async def _run_phases(page_test, browser, args):
     """Shared logic: fetch answers (API first, CheatNetwork fallback), then automate."""
 
+    if not browser.is_connected() or page_test.is_closed():
+        log_error("The test tab or browser was closed. Reopen the test and run the program again.")
+        return False
+
     # ── Clear screen for Phase 1 ──
     clear_screen()
     print_banner("Working...")
@@ -551,6 +558,22 @@ async def _run_phases(page_test, browser, args):
     answers_db = None
     answer_source = "Unknown"
     clean_man = ""
+    quizit_browser_pins = set()
+    selected_answers_page = None
+
+    async def try_quizit_browser():
+        nonlocal answers_db, answer_source
+        if answers_db or not is_quizit_bot_allowed() or not is_quizit_sign_in_required():
+            return
+        pin = await resolve_quizit_pin(page_test, clean_man, args.quiz_input)
+        if not pin or pin in quizit_browser_pins:
+            return
+        quizit_browser_pins.add(pin)
+        answers_db = await fetch_quizit_browser_answers(page_test.context, pin)
+        if answers_db:
+            answer_source = "Quizit Standard (signed-in browser)"
+            count = sum(key.startswith("id:") for key in answers_db) or len(get_display_questions(answers_db))
+            log_info(f"Loaded answers for {count} questions [{answer_source}]")
     
     if args.ai:
         has_key = await _ensure_ai_key()
@@ -564,13 +587,30 @@ async def _run_phases(page_test, browser, args):
         log_step(f"Bypassing database lookups; questions will be solved in real-time via {source_label}.")
     else:
         # ── Phase 1: Retrieve Answer Keys via multi-tiered engine ──
-        async with Spinner("Retrieving answers (Quizit API / Game PIN / Direct API / Network)..."):
+        # An open answer tab may belong to the previous test. Resolve the
+        # selected game first so unrelated keys cannot replace its API keys.
+        async with Spinner("Retrieving answers (Direct Game API / Quiz API / Network / Quizit fallback)..."):
             answers_db, answer_source = await retrieve_answers(
                 page_test, quiz_input=args.quiz_input, timeout=6.0
             )
+        if not browser.is_connected() or page_test.is_closed():
+            log_error("The test tab or browser was closed. Reopen the test and run the program again.")
+            return False
+        if not answers_db:
+            selected_answers_page = await select_existing_answer_tab(browser, ready_only=True)
+            if selected_answers_page:
+                answers_db = await scrape_answers(selected_answers_page, quiz_input=None)
+                if answers_db:
+                    answer_source = "CheatNetwork (existing tab)"
 
         if answers_db:
-            log_info(f"✅ Loaded {len(answers_db)} answers [{answer_source}]")
+            count = sum(key.startswith("id:") for key in answers_db) or len(get_display_questions(answers_db))
+            log_info(f"✅ Loaded answers for {count} questions [{answer_source}]")
+
+        if not browser.is_connected() or page_test.is_closed():
+            log_error("The test tab or browser was closed. Reopen the test and run the program again.")
+            return False
+        await try_quizit_browser()
 
         # If automatic answer retrieval didn't succeed, offer manual PIN / URL / ID entry
         if not answers_db:
@@ -589,77 +629,36 @@ async def _run_phases(page_test, browser, args):
                             None, fetch_answers_by_any_identifier, clean_man
                         )
                         if answers_db:
-                            log_info(f"✅ Loaded {len(answers_db)} answers [{answer_source}]")
+                            count = sum(key.startswith("id:") for key in answers_db) or len(get_display_questions(answers_db))
+                            log_info(f"✅ Loaded answers for {count} questions [{answer_source}]")
                         else:
                             log_error("Could not resolve answers from manual input.")
             except Exception:
                 pass
 
+        # Quizit's API now requires its own account. Let the website handle
+        # its normal login/refresh flow rather than storing credentials here.
+        await try_quizit_browser()
+
         # ── Lazy CheatNetwork fallback ──
         if not answers_db:
-            log_step(f"{C_YELLOW}Falling back to CheatNetwork scraping...{C_RESET}")
-            log_info("Opening CheatNetwork in a new tab...")
-            
-            # Open CheatNetwork page on-demand
-            if browser.contexts:
-                ctx = browser.contexts[0]
-            else:
-                ctx = await browser.new_context()
-            
-            page_answers = await ctx.new_page()
-            try:
-                await apply_stealth(page_answers)
-            except Exception:
-                pass  # stealth is nice-to-have, not critical
-
-            # Build quiz input for CheatNetwork form (Game PIN or https://wayground.com/join?gc=...)
-            quiz_input_str = await resolve_cheatnetwork_quiz_input(
-                page_test, manual_input=clean_man, args_input=args.quiz_input
-            )
-            
+            log_step("Falling back to CheatNetwork...")
+            quiz_input_str = None
+            if selected_answers_page is None:
+                quiz_input_str = await resolve_cheatnetwork_quiz_input(
+                    page_test, manual_input=clean_man, args_input=args.quiz_input
+                )
             target_cn_url = args.answers_url
             if quiz_input_str and "cheatnetwork.eu/services/quizizz/answers" in quiz_input_str:
                 target_cn_url = quiz_input_str
+            answers_db, answer_source = await retrieve_cheatnetwork_answers(
+                browser, page_test.context, quiz_input_str, target_cn_url,
+                preferred_page=selected_answers_page,
+            )
+            if not browser.is_connected() or page_test.is_closed():
+                log_error("The test tab or browser was closed. Reopen the test and run the program again.")
+                return False
 
-            await page_answers.goto(target_cn_url, wait_until="domcontentloaded")
-            
-            # Attempt 1: Auto-fill the CheatNetwork form
-            answers_db = await scrape_answers(page_answers, quiz_input=quiz_input_str)
-            
-            if answers_db:
-                answer_source = "CheatNetwork"
-                log_info("Closing CheatNetwork tab...")
-                await page_answers.close()
-            else:
-                # Attempt 2: Let the user manually interact with CheatNetwork
-                log_info(f"{C_YELLOW}Auto-scraping failed. Switching to manual mode...{C_RESET}")
-                print()
-                print(f"{C_YELLOW}{'─'*60}{C_RESET}")
-                print(f"{C_BOLD}{C_YELLOW}⏸  MANUAL CHEATNETWORK MODE{C_RESET}")
-                print(f"{C_YELLOW}{'─'*60}{C_RESET}")
-                print(f"  The CheatNetwork tab is open in the browser.")
-                print(f"  1.  Go to the {C_CYAN}CheatNetwork{C_RESET} tab")
-                print(f"  2.  Enter your quiz link or game PIN")
-                print(f"  3.  Click {C_BOLD}\"Get Answers\"{C_RESET}")
-                print(f"  4.  Wait for the answers to appear")
-                print(f"  5.  Come back here and press {C_BOLD}Enter{C_RESET}")
-                print(f"{C_YELLOW}{'─'*60}{C_RESET}")
-                print()
-                
-                await asyncio.get_event_loop().run_in_executor(
-                    None, input, "  ▶  Press ENTER when answers are visible on CheatNetwork..."
-                )
-                print()
-                
-                # Try scraping again (without auto-fill — user already filled the form)
-                answers_db = await scrape_answers(page_answers, quiz_input=None)
-                
-                if answers_db:
-                    answer_source = "CheatNetwork (manual)"
-                
-                log_info("Closing CheatNetwork tab...")
-                await page_answers.close()
-            
             if not answers_db:
                 if not args.no_ai:
                     log_step(f"{C_YELLOW}Could not retrieve answers from API or CheatNetwork.{C_RESET}")
@@ -728,7 +727,7 @@ async def _run_phases(page_test, browser, args):
 
     # ── Phase 2 ──
     print_phase_header(2, "Automating test")
-    await automate_test(
+    automation_finished = await automate_test(
         page_test,
         answers_db,
         wrong_count=wrong_count,
@@ -736,6 +735,8 @@ async def _run_phases(page_test, browser, args):
         use_ai=(not args.no_ai),
         ai_only=args.ai,
     )
+    if automation_finished is False:
+        return False
 
     # ── Phase 3: Scrape results ──
     clear_screen()

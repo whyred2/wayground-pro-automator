@@ -20,7 +20,7 @@ from config import (
     AI_MODEL,
 )
 from ui import log_info, log_found, log_progress, log_error, log_step, log_wrong
-from matching import find_answers, match_button_option, rank_and_match_buttons, get_display_questions
+from matching import find_answers, match_button_option, rank_and_match_buttons, get_display_questions, _option_signature
 from ai_solver import solve_question_with_ai, solve_fib_with_ai, generate_plausible_wrong
 
 try:
@@ -347,10 +347,14 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
             buttons = await _get_option_buttons(page)
             if buttons and len(buttons) > 0:
                 q_info = await _extract_question_info(page)
-                q_text = q_info.get("text", "")
-                q_img = q_info.get("image", "")
-                q_id = q_info.get("qid", "")
-                cur_key = q_id or q_text or q_img
+                current_number, _ = await _read_question_counter(page)
+                q_info["number"] = current_number
+                if not current_number and not q_info.get("qid"):
+                    option_info = [await _extract_button_info(btn, idx=i) for i, btn in enumerate(buttons)]
+                    signature = _option_signature(option_info)
+                    if any(text or image for text, image in signature):
+                        q_info["option_key"] = repr(sorted(signature.items()))
+                cur_key = _question_key(q_info, current_number)
 
                 # If this question is still the old question during page transition, wait!
                 if last_key and cur_key == last_key:
@@ -367,10 +371,9 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
                 first_vis = await fib_inputs[0].is_visible()
                 if first_vis:
                     q_info = await _extract_question_info(page)
-                    q_text = q_info.get("text", "")
-                    q_img = q_info.get("image", "")
-                    q_id = q_info.get("qid", "")
-                    cur_key = q_id or q_text or q_img
+                    current_number, _ = await _read_question_counter(page)
+                    q_info["number"] = current_number
+                    cur_key = _question_key(q_info, current_number)
 
                     if last_key and cur_key == last_key:
                         pass
@@ -586,6 +589,11 @@ async def _wait_for_transition(page, old_text: str = "", old_image: str = "", ol
             cur_text = cur_info.get("text", "")
             cur_img = cur_info.get("image", "")
 
+            current_number, _ = await _read_question_counter(page)
+            if old_q_num > 0 and current_number > 0 and current_number != old_q_num:
+                await asyncio.sleep(0.3)
+                return True
+
             # If question text has changed to a non-empty new question
             if cur_text and old_text and cur_text != old_text:
                 await asyncio.sleep(0.3)  # Allow DOM to render new option buttons completely
@@ -611,6 +619,36 @@ async def _wait_for_transition(page, old_text: str = "", old_image: str = "", ol
 
 # ─── Main Automation Loop ─────────────────────────────────────
 
+def _question_key(info: dict, number: int = 0) -> str:
+    identity = info.get("qid") or info.get("text") or info.get("image") or ""
+    if not identity:
+        return ""
+    if number > 0:
+        return f"{number}:{identity}"
+    if not info.get("qid") and info.get("option_key"):
+        return f"{identity}|{info['option_key']}"
+    return identity
+
+def _complete_blank_answers(answers, blank_count: int) -> list[str]:
+    """Require a nonempty text answer for every blank; never reuse a partial key."""
+    if not isinstance(answers, (list, tuple)) or len(answers) < blank_count:
+        return []
+    selected = answers[:blank_count]
+    if any(not isinstance(answer, str) or not answer.strip() for answer in selected):
+        return []
+    return [answer.strip() for answer in selected]
+
+
+async def _stop_unanswered_question(page, question_number: int, reason: str) -> bool:
+    """Leave the current question available for the user when no answer is resolved."""
+    await clear_highlights(page)
+    log_error(
+        f"Automation stopped at question {question_number}: {reason}. "
+        "No answer was submitted. Load answers for this test or check the selected AI, then run again."
+    )
+    return False
+
+
 async def automate_test(
     test_page,
     answers_db: dict[str, list[str]],
@@ -626,6 +664,7 @@ async def automate_test(
     expected_total: total number of real questions in test (excluding lookup aliases).
     use_ai: whether to use AI as a fallback or primary solver.
     ai_only: if True, solve 100% of questions with AI without DB lookups.
+    Returns False if a question cannot be answered safely, True on completion.
     """
     answered = 0
     correct = 0
@@ -655,7 +694,7 @@ async def automate_test(
         if wrong_count == 0:
             _wrong_indices_initialized = True
 
-    if ai_only or not answers_db:
+    if use_ai and (ai_only or not answers_db):
         total_label = f"{total} questions detected" if total > 0 else "question count will be read dynamically"
         log_info(f"🤖 Starting AI Solver ({_get_active_ai_label()}) — {total_label}.")
     else:
@@ -675,8 +714,8 @@ async def automate_test(
             log_info("✅ Test completion detected (results screen visible).")
             break
         elif status == 'timeout':
-            log_info("⚠ No question or results detected after 60s of waiting. Proceeding to results.")
-            break
+            log_error("No new question or results detected after 60s. Automation stopped; test completion was not confirmed.")
+            return False
         elif status == 'redemption_selected':
             last_question_key = ""  # Reset debounce so repeated redemption question is answered!
             await asyncio.sleep(0.5)
@@ -703,7 +742,7 @@ async def automate_test(
         elif page_total > 0:
             total = page_total
 
-        current_key = qid or question_text or question_image
+        current_key = _question_key(q_info, page_current or q_info.get("number", 0))
         if not current_key or current_key == last_question_key:
             await asyncio.sleep(0.5)
             continue
@@ -743,13 +782,18 @@ async def automate_test(
         deliberate_wrong = display_num in wrong_indices
 
         # ── Find correct answer(s) from DB ──
+        # The full option set distinguishes questions with identical stems
+        # when the test page does not expose their server question IDs.
+        buttons = await _get_option_buttons(test_page)
+        buttons_info = [await _extract_button_info(btn, idx=i) for i, btn in enumerate(buttons)]
         correct_answers = []
         if not ai_only and answers_db:
             found = find_answers(
                 question=question_text,
                 answers_db=answers_db,
                 qid=qid,
-                image_url=question_image
+                image_url=question_image,
+                options_info=buttons_info,
             )
             if found:
                 correct_answers = found
@@ -798,9 +842,9 @@ async def automate_test(
             answers_to_fill = []
             ai_fib_wrongs = []
             if correct_answers:
-                answers_to_fill = list(correct_answers[:len(visible_fib)])
+                answers_to_fill = _complete_blank_answers(correct_answers, len(visible_fib))
 
-            # If no DB answer found (or AI mode) and AI is enabled
+            # A partial key also requires a complete new prediction for all blanks.
             if not answers_to_fill and use_ai:
                 ai_source_note = "AI mode active" if (ai_only or not answers_db) else "No DB match"
                 log_step(f"🤖 {ai_source_note} — querying AI Solver ({_get_active_ai_label()}) for missing term(s)...")
@@ -824,22 +868,28 @@ async def automate_test(
                         pass
 
                 loop = asyncio.get_event_loop()
-                ai_fib_answers, ai_fib_wrongs, reasoning = await loop.run_in_executor(
-                    None,
-                    solve_fib_with_ai,
-                    question_text,
-                    len(visible_fib),
-                    image_b64
-                )
-                if ai_fib_answers:
-                    answers_to_fill = ai_fib_answers
+                try:
+                    ai_fib_answers, ai_fib_wrongs, reasoning = await loop.run_in_executor(
+                        None,
+                        solve_fib_with_ai,
+                        question_text,
+                        len(visible_fib),
+                        image_b64
+                    )
+                except Exception as exc:
+                    log_step(f"AI could not answer this question: {exc}")
+                    ai_fib_answers, ai_fib_wrongs, reasoning = [], [], ""
+                answers_to_fill = _complete_blank_answers(ai_fib_answers, len(visible_fib))
+                if answers_to_fill:
                     reason_short = f" ({reasoning[:70]}...)" if len(reasoning) > 70 else (f" ({reasoning})" if reasoning else "")
                     log_found(f"💡 AI Solver predicted: {answers_to_fill}{reason_short}")
 
-            # Fallback if still empty
+            # Do not substitute a generic word or copy one answer into other blanks.
             if not answers_to_fill:
-                log_step(f"{C_YELLOW}[SKIP] No DB answer or AI prediction for blank — guessing 'yes'{C_RESET}")
-                answers_to_fill = ["yes"] * len(visible_fib)
+                return await _stop_unanswered_question(
+                    test_page, display_num,
+                    f"no complete answer was found for {len(visible_fib)} blank(s)"
+                )
 
             # Handle deliberate wrong with realistic human-like mistakes
             if deliberate_wrong:
@@ -859,7 +909,7 @@ async def automate_test(
 
             # Fill each blank
             for i, fi in enumerate(visible_fib):
-                ans_val = answers_to_fill[i] if i < len(answers_to_fill) else answers_to_fill[0]
+                ans_val = answers_to_fill[i]
                 log_step(f"  Typing into blank [{i+1}/{len(visible_fib)}]: \"{ans_val}\"")
                 try:
                     await fi.scroll_into_view_if_needed()
@@ -873,7 +923,9 @@ async def automate_test(
                     }""", ans_val)
                     await asyncio.sleep(0.2)
                 except Exception as ex:
-                    log_error(f"Failed to fill input: {ex}")
+                    return await _stop_unanswered_question(
+                        test_page, display_num, f"could not fill blank {i+1}: {ex}"
+                    )
 
             # Advance / Submit
             await asyncio.sleep(0.4)
@@ -903,18 +955,18 @@ async def automate_test(
             continue
 
         # ── Get all option buttons with rich info and ranked precision matching ──
-        buttons = await _get_option_buttons(test_page)
         correct_buttons = []
         wrong_buttons = []
-        buttons_info = []
-
-        if buttons:
-            for i, btn in enumerate(buttons):
-                b_info = await _extract_button_info(btn, idx=i)
-                buttons_info.append(b_info)
 
         if correct_answers and buttons_info:
             c_indices, w_indices = rank_and_match_buttons(buttons_info, correct_answers, is_msq=is_msq)
+            if is_msq and not all(
+                set(rank_and_match_buttons(buttons_info, [answer], is_msq=False)[0]).intersection(c_indices)
+                for answer in correct_answers
+            ):
+                # Matching only some expected choices would submit an incomplete answer.
+                # Several accepted aliases can identify the same correct option.
+                c_indices, w_indices = [], []
             for ci in c_indices:
                 b_info = buttons_info[ci]
                 label = b_info.get("text") or b_info.get("alt") or f"Option {ci+1}"
@@ -964,14 +1016,26 @@ async def automate_test(
                     pass
 
             loop = asyncio.get_event_loop()
-            ai_indices, reasoning = await loop.run_in_executor(
-                None,
-                solve_question_with_ai,
-                question_text,
-                buttons_info,
-                is_msq,
-                image_b64
-            )
+            try:
+                ai_indices, reasoning = await loop.run_in_executor(
+                    None,
+                    solve_question_with_ai,
+                    question_text,
+                    buttons_info,
+                    is_msq,
+                    image_b64
+                )
+            except Exception as exc:
+                log_step(f"AI could not answer this question: {exc}")
+                ai_indices, reasoning = [], ""
+
+            if not isinstance(ai_indices, (list, tuple)) or any(
+                isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < len(buttons)
+                for idx in ai_indices
+            ):
+                ai_indices = []
+            else:
+                ai_indices = list(dict.fromkeys(ai_indices))
 
             if ai_indices:
                 # If radio buttons exist in DOM, strictly enforce single choice even if AI model returned multiple
@@ -1002,25 +1066,10 @@ async def automate_test(
                 elif len(correct_buttons) <= 1:
                     is_msq = False
 
-        # Fallback if neither DB nor AI found a match
+        # Missing keys or a failed AI request must leave the question unanswered.
         if not correct_buttons:
-            log_step(f"{C_YELLOW}[SKIP] No match from DB or AI — guessing randomly{C_RESET}")
-            if buttons:
-                random_idx = random.randint(0, len(buttons) - 1)
-                random_btn = buttons[random_idx]
-                r_info = await _extract_button_info(random_btn, idx=random_idx)
-                r_label = r_info.get("text") or r_info.get("alt") or f"Option {random_idx+1}"
-                log_step(f"Guessing: \"{r_label}\"")
-                await highlight_answer(test_page, random_btn)
-                await asyncio.sleep(0.4)
-                if not await _safe_click(random_btn, "random guess"):
-                    continue
-                await asyncio.sleep(0.4)
-                await _advance_if_next_button(test_page)
-                await asyncio.sleep(CLICK_DELAY_MS / 1000)
-                await clear_highlights(test_page)
-                await _wait_for_transition(test_page, old_text=question_text, old_image=question_image, old_q_num=page_current or answered)
-            continue
+            reason = "no answer options are available" if not buttons else "no complete answer matched the available options"
+            return await _stop_unanswered_question(test_page, display_num, reason)
 
         # ─────────────────────────────────────────────────
         # MSQ: Multi-Select Question
@@ -1109,6 +1158,7 @@ async def automate_test(
     if answered > 0:
         pct = int(100 * correct / answered)
         log_info(f"   Estimated score: ~{pct}%")
+    return True
 
 
 # ─── Results Scraping ──────────────────────────────────────────

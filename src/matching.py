@@ -1,5 +1,7 @@
 import re
 import html
+from collections import Counter
+from urllib.parse import urlparse
 
 
 def _norm(s: str) -> str:
@@ -22,9 +24,13 @@ def _norm(s: str) -> str:
 
 def get_display_questions(answers_db: dict[str, list[str]]) -> list[tuple[str, list[str]]]:
     """
-    Extract clean, unique user-facing questions and their answers.
+    Extract user-facing questions and their answers, preserving question occurrences.
     Filters out internal lookup aliases (hex IDs, id: prefixes, img: prefixes).
     """
+    records = getattr(answers_db, "questions", None)
+    if records:
+        return [(record.text or f"[Image Question: {record.qid or index}]", list(record.answers))
+                for index, record in enumerate(records.values(), start=1)]
     display_list = []
     for k, v in answers_db.items():
         if k.startswith("__"):
@@ -50,11 +56,60 @@ def get_display_questions(answers_db: dict[str, list[str]]) -> list[tuple[str, l
     return display_list
 
 
+def _image_name(value: str) -> str:
+    return urlparse(value or "").path.rsplit("/", 1)[-1].lower()
+
+
+def _option_signature(options: list[dict]) -> Counter:
+    """Option order may be shuffled; preserve duplicate option counts."""
+    return Counter((_norm(option.get("text") or ""), _image_name(option.get("img_src") or ""))
+                   for option in options)
+
+
+def _find_record_answers(question, records, image_url, options_info):
+    q_norm = _norm(question)
+    candidates = [record for record in records if q_norm and _norm(record.text) == q_norm]
+    image_name = _image_name(image_url)
+    if image_name:
+        image_candidates = [record for record in (candidates or records)
+                            if any(_image_name(image) == image_name for image in record.images)]
+        if image_candidates:
+            candidates = image_candidates
+    if not candidates and q_norm:
+        substring = []
+        fuzzy = []
+        for record in records:
+            text = _norm(record.text)
+            if len(text) > 6 and len(q_norm) > 6 and (text in q_norm or q_norm in text):
+                ratio = min(len(text), len(q_norm)) / max(len(text), len(q_norm))
+                if ratio >= 0.5:
+                    substring.append((ratio, record))
+            similarity = _similarity(text, q_norm)
+            if similarity > 0.80:
+                fuzzy.append((similarity, record))
+        scored = substring or fuzzy
+        if scored:
+            best = max(score for score, _ in scored)
+            candidates = [record for score, record in scored if abs(score - best) < 1e-9]
+    if len(candidates) > 1 and options_info:
+        signature = _option_signature(options_info)
+        candidates = [record for record in candidates
+                      if not record.options or _option_signature(record.options) == signature]
+    if not candidates:
+        return None
+    answer = candidates[0].answers
+    # Equal wording is insufficient when the corresponding keys differ.
+    if any(record.answers != answer for record in candidates[1:]):
+        return None
+    return list(answer)
+
+
 def find_answers(
     question: str,
     answers_db: dict[str, list[str]],
     qid: str | None = None,
-    image_url: str | None = None
+    image_url: str | None = None,
+    options_info: list[dict] | None = None,
 ) -> list[str] | None:
     """
     Find the answer(s) for a given question using multiple matching strategies:
@@ -76,6 +131,10 @@ def find_answers(
             return answers_db[clean_qid]
         if f"id:{clean_qid}" in answers_db:
             return answers_db[f"id:{clean_qid}"]
+
+    records = getattr(answers_db, "questions", None)
+    if records:
+        return _find_record_answers(question, list(records.values()), image_url, options_info)
 
     # Strategy 2: Image filename match
     if image_url:

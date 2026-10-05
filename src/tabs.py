@@ -28,11 +28,15 @@ async def _page_label(page) -> tuple[str, str]:
     return title, url
 
 
-async def pick_tab(pages: list, role_name: str, keyword_hint: str) -> object:
+async def pick_tab(pages: list, role_name: str, keyword_hint: str, *,
+                   allow_skip: bool = False, skip_label: str = "Continue automatic lookup") -> object | None:
     """
     Show the user a numbered list of open tabs and let them pick one.
     Returns the selected page object.
     """
+    pages = [page for page in pages if not page.is_closed()]
+    if not pages:
+        return None
     print(f"\n{C_CYAN}{'─'*60}{C_RESET}")
     print(f"  Select the {C_BOLD}{role_name}{C_RESET} tab:")
     print(f"{C_CYAN}{'─'*60}{C_RESET}")
@@ -49,17 +53,23 @@ async def pick_tab(pages: list, role_name: str, keyword_hint: str) -> object:
         print(f"  {C_BOLD}{i+1}{C_RESET}) {title_short}")
         print(f"     {C_DIM}{url_short}{C_RESET}{marker}")
 
+    if allow_skip:
+        print(f"  {C_BOLD}0{C_RESET}) {skip_label}")
     print()
     while True:
         choice = await asyncio.get_event_loop().run_in_executor(
             None, input, f"  Enter number [default: {best_guess+1}]: "
         )
         choice = choice.strip()
-        if not choice:
-            return pages[best_guess]
+        if allow_skip and choice == "0":
+            return None
         try:
-            idx = int(choice) - 1
+            idx = int(choice) - 1 if choice else best_guess
             if 0 <= idx < len(pages):
+                if pages[idx].is_closed():
+                    log_info("That tab was closed. Choose another open tab.")
+                    return await pick_tab(pages, role_name, keyword_hint,
+                                          allow_skip=allow_skip, skip_label=skip_label)
                 return pages[idx]
         except ValueError:
             pass

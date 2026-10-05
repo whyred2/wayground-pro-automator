@@ -4,13 +4,15 @@ Supports automatic form submission (game pin / link) and graceful fallback.
 """
 
 import asyncio
-import sys
+from time import monotonic
+from urllib.parse import urlparse
 
 from config import (
-    SEL_QUESTION_BOX, SEL_QUESTION_TEXT, SEL_ANSWER_TEXT,
+    SEL_QUESTION_BOX,
     SEL_CN_INPUT, SEL_CN_SUBMIT,
 )
 from ui import log_info, log_step, log_error
+from answer_db import AnswerDatabase
 
 try:
     from playwright.async_api import TimeoutError as PlaywrightTimeout
@@ -73,16 +75,16 @@ async def _fill_and_submit(page, quiz_input: str) -> bool:
 
 async def _parse_question_boxes(page) -> dict[str, list[str]]:
     """
-    Parse all .question-box elements on the page into a dict.
-    Returns { question_text: [answer1, answer2, ...] }
+    Preserve each visible question box, including repeated question wording.
     """
-    answers: dict[str, list[str]] = {}
+    answers = AnswerDatabase()
     try:
         raw_data = await page.evaluate("""
             () => {
                 const list = [];
                 const boxes = document.querySelectorAll('.question-box, [class*="question-box"]');
                 for (const box of boxes) {
+                    if (!box.getClientRects().length) continue;
                     // 1. Extract question text
                     let qEl = box.querySelector('p.font-semibold, p[class*="font-semibold"], p.break-words, p[class*="text-"]');
                     if (!qEl) {
@@ -118,7 +120,8 @@ async def _parse_question_boxes(page) -> dict[str, list[str]]:
                         }
                     }
                     if (aTexts.length > 0) {
-                        list.push({ question: qText, answers: aTexts });
+                        list.push({ question: qText, answers: aTexts,
+                            qid: box.getAttribute('data-quesid') || box.getAttribute('data-question-id') || '' });
                     }
                 }
                 return list;
@@ -129,11 +132,7 @@ async def _parse_question_boxes(page) -> dict[str, list[str]]:
         for i, item in enumerate(raw_data):
             q_text = item["question"]
             a_texts = item["answers"]
-            if q_text not in answers:
-                answers[q_text] = []
-            for text in a_texts:
-                if text not in answers[q_text]:
-                    answers[q_text].append(text)
+            answers.add_question(q_text, a_texts, qid=item.get("qid", ""))
 
             if len(a_texts) > 1:
                 log_step(f"Q{i+1} [MSQ {len(a_texts)} answers]: \"{q_text[:45]}...\" → {a_texts}")
@@ -146,167 +145,162 @@ async def _parse_question_boxes(page) -> dict[str, list[str]]:
     return answers
 
 
-async def scrape_answers(page, quiz_input: str | None = None) -> dict[str, list[str]] | None:
-    """
-    Scrape question-answer pairs from the CheatNetwork answer key page.
-    
-    If quiz_input is provided, tries to auto-fill the form with it.
-    Returns a dict: { question_text: [answer1, answer2, ...] }
-    Returns None if scraping failed (instead of exiting).
-    """
-    log_info("Waiting for CheatNetwork page to load...")
+def _page_closed(page, error=None) -> bool:
+    if page.is_closed():
+        return True
+    message = str(error or "").lower()
+    return "has been closed" in message or "browser has disconnected" in message
 
-    # Wait for the page to be interactive
-    await page.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(1)
 
-    # Wait for either the form input or the question boxes to appear (handles automatic redirection)
-    log_info("Checking page state (form vs answers)...")
+async def read_cheatnetwork_state(page) -> dict:
+    """Inspect visible dialogs, ignoring stale hidden login-modal content."""
+    if _page_closed(page):
+        return {"status": "closed", "questions": 0}
     try:
-        # Wait for either selector concurrently to handle SPA redirection race conditions
-        done, pending = await asyncio.wait(
-            [
-                asyncio.create_task(page.wait_for_selector(SEL_CN_INPUT, timeout=8000)),
-                asyncio.create_task(page.wait_for_selector(SEL_QUESTION_BOX, timeout=8000))
-            ],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        
-        if await page.query_selector(SEL_QUESTION_BOX):
-            log_info("✅ Answers are already loaded on the page. Skipping form submission.")
-            quiz_input = None
-    except Exception:
-        pass
+        return await page.evaluate("""() => {
+            const visible = el => el && el.getClientRects().length > 0
+                && getComputedStyle(el).visibility !== 'hidden';
+            const dialogs = [...document.querySelectorAll(
+                '[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="alert"]'
+            )].filter(visible);
+            const notice = dialogs.map(el => el.innerText || '').join(' ').toLowerCase();
+            const boxes = [...document.querySelectorAll('.question-box, [class*="question-box"]')]
+                .filter(visible);
+            const ready = boxes.filter(box => [...box.querySelectorAll('ul li, li span')]
+                .some(el => (el.innerText || '').trim()));
+            // A download dialog takes precedence over a transient login notice
+            // or partially rendered question boxes. Do not interrupt that request.
+            if (/downloading\\s+answers|loading\\s+answers|fetching\\s+answers/.test(notice))
+                return {status: 'downloading', questions: ready.length};
+            if (/not\\s+logged\\s+in|access\\s+denied/.test(notice)
+                || /(?:^|\\/)login(?:\\/|$)/i.test(location.pathname))
+                return {status: 'login', questions: ready.length};
+            if (ready.length) return {status: 'ready', questions: ready.length};
+            const form = [...document.querySelectorAll('input[placeholder="Enter game pin or link"], input[type="text"]')]
+                .some(visible);
+            return {status: form ? 'form' : 'waiting', questions: 0};
+        }""")
+    except Exception as exc:
+        if _page_closed(page, exc):
+            return {"status": "closed", "questions": 0}
+        if "execution context was destroyed" in str(exc).lower():
+            return {"status": "waiting", "questions": 0}
+        return {"status": "error", "questions": 0, "message": str(exc)}
 
-    # If the tab is already on the answers page, skip form filling
-    current_url = page.url
-    if "/answers#" in current_url:
-        log_info("Already on the CheatNetwork answers page. Skipping form submission.")
-        quiz_input = None
 
-    # Base URL to return to in case of login redirects
-    home_url = current_url.split("/answers#")[0] if "/answers#" in current_url else current_url
-    if "/login" in home_url:
-        home_url = "https://cheatnetwork.eu/services/quizizz"
-
-    attempts = 3
-    for attempt in range(attempts):
-        attempt_quiz_input = quiz_input
-        # ── Auto-fill form if we have quiz input ──
-        if attempt_quiz_input:
-            if "cheatnetwork.eu/services/quizizz/answers" in attempt_quiz_input:
-                log_info(f"Navigating directly to answers URL: {attempt_quiz_input}")
-                await page.goto(attempt_quiz_input, wait_until="domcontentloaded")
-            else:
-                log_info(f"Auto-filling CheatNetwork form (Attempt {attempt+1}/{attempts}) with: \"{attempt_quiz_input}\"")
-                filled = await _fill_and_submit(page, attempt_quiz_input)
-                if not filled:
-                    if attempt < attempts - 1:
-                        log_step("Auto-fill failed. Going back to form and retrying...")
-                        await page.goto(home_url, wait_until="domcontentloaded")
-                        await asyncio.sleep(2)
-                        continue
-                    else:
-                        log_error("Auto-fill failed repeatedly.")
-                        return None
-
-        # ── Wait for answers or login modal/redirect ──
-        log_info("Waiting for answers to load...")
-        is_logged_out = False
-        answers_appeared = False
-        try:
-            # Poll for up to 10 seconds to detect modal/redirect early
-            for _ in range(20):
+async def _wait_for_answers(page, quiz_input, *, wait_timeout, download_timeout, initial_state=None) -> bool:
+    deadline = monotonic() + wait_timeout
+    submitted = False
+    login_requested = False
+    download_started = False
+    login_seen_at = None
+    last_progress = monotonic()
+    while monotonic() < deadline:
+        state = initial_state if initial_state is not None else await read_cheatnetwork_state(page)
+        initial_state = None
+        status = state["status"]
+        if status != "login":
+            login_seen_at = None
+        if status == "ready":
+            return True
+        if status == "closed":
+            log_error("The CheatNetwork tab or browser was closed. Select an open answer tab to continue.")
+            return False
+        if status == "error":
+            log_error(f"Could not read CheatNetwork: {state.get('message', 'unknown error')}")
+            return False
+        if status == "downloading":
+            if not download_started:
+                download_started = True
+                deadline = max(deadline, monotonic() + download_timeout)
+                log_info("Downloading answers... Waiting for the dialog to close.")
+            if monotonic() - last_progress >= 30:
+                log_info("CheatNetwork is still downloading answers. Keeping the page open.")
+                last_progress = monotonic()
+        elif status == "login":
+            if login_seen_at is None:
+                login_seen_at = monotonic()
+            # Some requests briefly show the login notice before the download
+            # dialog. Give that transition time to complete without submitting again.
+            if monotonic() - login_seen_at < 3:
                 await asyncio.sleep(0.5)
-                if await page.query_selector(SEL_QUESTION_BOX):
-                    answers_appeared = True
-                    break
-                
-                # Check for login redirection
-                if "/login" in page.url:
-                    is_logged_out = True
-                    break
-                    
-                # Check for headlessui dialog with "Not logged in" / "Access denied"
-                dialog = await page.query_selector('[role="dialog"]')
-                if dialog:
-                    d_text = await dialog.inner_text()
-                    if "Not logged in" in d_text or "Access denied" in d_text:
-                        is_logged_out = True
-                        break
-                        
-                # Check generic body text
-                body_t = await page.inner_text("body")
-                if "Not logged in" in body_t or "Access denied" in body_t:
-                    is_logged_out = True
-                    break
-        except Exception:
-            pass
-
-        if is_logged_out:
-            if attempt < attempts - 1:
-                log_step(f"⚠ Got 'Not logged in' on CheatNetwork (Attempt {attempt+1}/{attempts}). Navigating back to form and retrying...")
-                await page.goto(home_url, wait_until="domcontentloaded")
-                await asyncio.sleep(2)
                 continue
-            else:
-                log_error("Got 'Not logged in' modal or redirect repeatedly. Cannot proceed.")
-                return None
+            if login_requested:
+                log_error("CheatNetwork still reports 'Not logged in'. No further requests were sent.")
+                return False
+            login_requested = True
+            log_info("CheatNetwork reports 'Not logged in'. Sign in in that tab; the page will stay open.")
+            choice = await asyncio.get_running_loop().run_in_executor(
+                None, input, "  Sign in, then press ENTER to continue (or type s to skip): "
+            )
+            if choice.strip().lower() in ("s", "skip", "n", "no"):
+                return False
+            # Login time is user-controlled and must not consume the download wait.
+            deadline = monotonic() + wait_timeout
+            download_started = False
+            submitted = False
+            login_seen_at = None
+            continue
+        elif status == "form" and quiz_input and not submitted and not download_started:
+            submitted = True
+            if not await _fill_and_submit(page, quiz_input):
+                return False
+            log_info("Waiting for answers to load...")
+        await asyncio.sleep(0.5)
+    log_error("CheatNetwork did not finish loading answers. The page was kept open without reloading.")
+    return False
 
-        # Final wait for question box if not already appeared
-        if not answers_appeared:
-            try:
-                await page.wait_for_selector(SEL_QUESTION_BOX, timeout=20000)
-                break # Success!
-            except PlaywrightTimeout:
-                if attempt < attempts - 1:
-                    log_step(f"Timeout waiting for answers (Attempt {attempt+1}/{attempts}). Retrying form submission...")
-                    await page.goto(home_url, wait_until="domcontentloaded")
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    log_error("No .question-box elements appeared after 30 seconds.")
-                    await page.screenshot(path="error_debug_scrape.png")
-                    return None
-        else:
-            break # Success!
 
-    # Give a brief moment for initial JS render (avoid networkidle timeout on SPAs with continuous polling)
+async def scrape_answers(page, quiz_input: str | None = None, *,
+                         wait_timeout: float = 120.0, download_timeout: float = 300.0
+                         ) -> dict[str, list[str]] | None:
+    """Read an existing answer tab or submit once and wait through its dialogs."""
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=2000)
-    except Exception:
-        pass
-    await asyncio.sleep(1.0)
+        if _page_closed(page):
+            log_error("The selected CheatNetwork tab was closed.")
+            return None
+        log_info("Checking CheatNetwork page state (answers / download / login / form)...")
+        await page.wait_for_load_state("domcontentloaded")
+        state = await read_cheatnetwork_state(page)
+        if state["status"] == "ready":
+            log_info("Answers are already loaded. Reading the selected tab without submitting the form.")
+            quiz_input = None
+        elif quiz_input:
+            parsed = urlparse(quiz_input)
+            if parsed.hostname == "cheatnetwork.eu" and parsed.path.startswith("/services/quizizz/answers"):
+                if page.url != quiz_input:
+                    await page.goto(quiz_input, wait_until="domcontentloaded")
+                    state = await read_cheatnetwork_state(page)
+                quiz_input = None
+        if state["status"] != "ready" and not await _wait_for_answers(
+            page, quiz_input, wait_timeout=wait_timeout, download_timeout=download_timeout, initial_state=state
+        ):
+            return None
 
-    # Scroll down gradually to trigger lazy-loading of all questions
-    log_step("Scrolling to load all questions...")
-    prev_count = 0
-    for _ in range(25):
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-        await asyncio.sleep(0.3)
-        boxes = await page.query_selector_all(SEL_QUESTION_BOX)
-        if len(boxes) == prev_count and len(boxes) > 0:
-            break  # No new items loaded — we're done
-        prev_count = len(boxes)
-
-    # Scroll back to top
-    await page.evaluate("window.scrollTo(0, 0)")
-    await asyncio.sleep(0.3)
-
-    # ── Parse all question boxes ──
-    answers = await _parse_question_boxes(page)
-
-    log_info(f"Successfully parsed {len(answers)} question-answer pairs.")
-
-    msq_count = sum(1 for v in answers.values() if len(v) > 1)
-    if msq_count > 0:
-        log_info(f"  ↳ {msq_count} multi-select questions detected.")
-
-    if len(answers) == 0:
-        log_error("No answers were scraped from CheatNetwork.")
-        await page.screenshot(path="error_debug_scrape.png")
+        log_step("Scrolling to load all questions...")
+        previous_count = 0
+        stable_rounds = 0
+        for _ in range(25):
+            if _page_closed(page):
+                return None
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+            await asyncio.sleep(0.5)
+            boxes = await page.query_selector_all(SEL_QUESTION_BOX)
+            count = len(boxes)
+            stable_rounds = stable_rounds + 1 if count == previous_count and count > 0 else 0
+            if stable_rounds >= 2:
+                break
+            previous_count = count
+        await page.evaluate("window.scrollTo(0, 0)")
+        answers = await _parse_question_boxes(page)
+        if not answers:
+            log_error("No answer keys were found in the selected CheatNetwork tab.")
+            return None
+        log_info(f"Successfully parsed {len(answers)} question-answer pairs.")
+        return answers
+    except Exception as exc:
+        if _page_closed(page, exc):
+            log_error("The CheatNetwork tab or browser was closed. Answer retrieval stopped safely.")
+        else:
+            log_error(f"Could not read CheatNetwork answers: {exc}")
         return None
-
-    return answers

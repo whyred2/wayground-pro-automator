@@ -1,19 +1,24 @@
 """
 Wayground Answer Retrieval Engine:
 Fetches answer keys via:
-1. Quizit Online Bot API (Game PIN / Code / Room Hash) — instant, 100% accurate for live games
-2. Wayground Direct API (_quizserver) — for public / solo quizzes with 24-hex Quiz IDs
-3. Network interception & DOM inspection — auto-detects PINs, room hashes, and quiz IDs
+1. Wayground Game API (PIN -> checkRoom -> getQuestions)
+2. Wayground public library search + Quiz API — verified against game questions
+3. Quizit Online Bot API — optional fallback when direct answers are unavailable
+4. Network interception & DOM inspection — captures answer keys when supplied by the server
 """
 
 import asyncio
 import urllib.request
+import urllib.error
 import json
 import re
 import html
 import time
+import uuid
+from urllib.parse import urlparse, parse_qs
 
-from ui import log_info, log_step, log_error
+from ui import log_step
+from answer_db import AnswerDatabase
 
 # ─── Shared state for discovery ─────────────────────────────────
 _answers_ready_event = asyncio.Event()
@@ -28,9 +33,32 @@ _discovered_quiz_id: str | None = None
 _in_progress_pins: set[str] = set()
 _completed_pins: dict[str, dict[str, list[str]]] = {}
 _allow_quizit_bot: bool = True
+_quizit_sign_in_required: bool = False
 
 HEX_24_REGEX = re.compile(r"^[a-fA-F0-9]{24}$")
 PIN_REGEX = re.compile(r"^\d{4,9}$")
+ROOM_HASH_REGEX = re.compile(r"^[a-zA-Z0-9_-]{10,128}$")
+API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
+def _request_json(url: str, payload: dict | None = None, extra_headers: dict | None = None) -> dict:
+    headers = dict(API_HEADERS)
+    headers.update(extra_headers or {})
+    raw = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        raw = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=raw, headers=headers)
+    with urllib.request.urlopen(request, timeout=8) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("API returned an invalid JSON object")
+    if data.get("success") is False or data.get("error"):
+        raise ValueError(str(data.get("message") or data.get("error") or "API request failed"))
+    return data
 
 
 def set_allow_quizit_bot(allowed: bool):
@@ -44,10 +72,27 @@ def is_quizit_bot_allowed() -> bool:
     return _allow_quizit_bot
 
 
+def is_quizit_sign_in_required() -> bool:
+    """Report when the anonymous Quizit API requires a browser login."""
+    return _quizit_sign_in_required
+
+
 def get_discovered_pin() -> str | None:
     """Return the Game PIN captured by the network listener, if any."""
     global _discovered_pin
     return _discovered_pin
+
+
+def reset_answer_state():
+    """Start discovery for the selected test page, without reusing another quiz."""
+    global _answers_ready_event, _cached_answers_db, _cached_source
+    global _discovered_pin, _discovered_hash, _discovered_quiz_id
+    global _quizit_sign_in_required
+    _answers_ready_event = asyncio.Event()
+    _cached_answers_db = None
+    _cached_source = "Unknown"
+    _discovered_pin = _discovered_hash = _discovered_quiz_id = None
+    _quizit_sign_in_required = False
 
 
 def is_valid_quiz_id(val: any) -> bool:
@@ -63,13 +108,68 @@ def is_valid_game_pin(val: any) -> bool:
 def _set_answers(answers: dict[str, list[str]], source: str):
     """Event-safe setter for globally retrieved answers."""
     global _cached_answers_db, _cached_source
-    if not _answers_ready_event.is_set() and answers:
-        _cached_answers_db = answers
-        _cached_source = source
+    if answers:
+        if _cached_answers_db is None:
+            _cached_answers_db = answers
+            _cached_source = source
+        else:
+            _cached_answers_db.update(answers)
         _answers_ready_event.set()
 
 
 # ─── API 1: Quizit Online Bot API (Game PIN) ────────────────────
+
+def parse_quizit_answers(data: dict) -> dict[str, list[str]]:
+    """Parse supplied Quizit keys, rejecting an explicitly unsolved result."""
+    if not isinstance(data, dict):
+        raise ValueError("Quizit returned an invalid JSON object")
+    if data.get("solved") is False:
+        raise ValueError("Quizit could not retrieve the answer keys for this game")
+    questions = data.get("questions", []) or data.get("answers", [])
+    if not isinstance(questions, list) or not questions:
+        raise Exception("Quizit returned no questions")
+
+    answers_db = AnswerDatabase()
+    for item in questions:
+        if not isinstance(item, dict):
+            continue
+        q_id = str(item.get("id") or item.get("_id") or "").strip()
+        q_info = item.get("question") if isinstance(item.get("question"), dict) else {}
+        q_raw = q_info.get("text", "") if q_info else (item.get("question") if isinstance(item.get("question"), str) else "")
+        q_text = html.unescape(re.sub(r"<[^<]+?>", "", q_raw)).strip() if q_raw else ""
+        q_image = str(q_info.get("image", "") or "").strip()
+
+        # Extract correct answers (texts, option images)
+        answers_list = item.get("answers", [])
+        correct_texts = []
+        if isinstance(answers_list, list):
+            for a in answers_list:
+                if isinstance(a, dict):
+                    a_raw = a.get("text", "")
+                    a_img = a.get("image", "")
+                elif isinstance(a, str):
+                    a_raw = a
+                    a_img = ""
+                else:
+                    continue
+                if a_raw:
+                    a_text = html.unescape(re.sub(r"<[^<]+?>", "", a_raw)).strip()
+                    if a_text and a_text not in correct_texts:
+                        correct_texts.append(a_text)
+                if a_img:
+                    img_file = a_img.split("/")[-1].split("?")[0].strip()
+                    if img_file and img_file not in correct_texts:
+                        correct_texts.append(img_file)
+
+        if correct_texts:
+            answers_db.add_question(q_text, correct_texts, qid=q_id,
+                                    images=[q_image] if q_image else [])
+
+    if not answers_db:
+        raise Exception("Failed to parse question-answer pairs from Quizit")
+
+    return answers_db
+
 
 def fetch_quizit_answers(pin: str) -> dict[str, list[str]]:
     """
@@ -77,7 +177,7 @@ def fetch_quizit_answers(pin: str) -> dict[str, list[str]]:
     Strictly deduplicated: only one HTTP request is ever made per PIN.
     Returns { question_text: [correct_answer1, ...], qid: [...], img_url: [...] }
     """
-    global _in_progress_pins, _completed_pins
+    global _in_progress_pins, _completed_pins, _quizit_sign_in_required
 
     clean_pin = re.sub(r"\D", "", str(pin).strip())
     if not clean_pin:
@@ -88,10 +188,14 @@ def fetch_quizit_answers(pin: str) -> dict[str, list[str]]:
 
     if clean_pin in _in_progress_pins:
         # Another coroutine is already fetching this PIN, wait for it
-        for _ in range(40):
+        for _ in range(110):
             time.sleep(0.3)
             if clean_pin in _completed_pins:
                 return _completed_pins[clean_pin]
+            if clean_pin not in _in_progress_pins:
+                break
+        else:
+            raise ValueError("A Quizit request for this PIN is already in progress")
 
     _in_progress_pins.add(clean_pin)
     try:
@@ -104,75 +208,20 @@ def fetch_quizit_answers(pin: str) -> dict[str, list[str]]:
             },
         )
 
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             if response.status != 200:
                 raise Exception(f"HTTP {response.status}")
             data = json.loads(response.read().decode("utf-8"))
 
-        questions = data.get("questions", []) or data.get("answers", [])
-        if not questions:
-            raise Exception("Quizit returned no questions")
-
-        answers_db: dict[str, list[str]] = {}
-        for item in questions:
-            q_id = str(item.get("id") or item.get("_id") or "").strip()
-            q_info = item.get("question") if isinstance(item.get("question"), dict) else {}
-            q_raw = q_info.get("text", "") if q_info else (item.get("question") if isinstance(item.get("question"), str) else "")
-            q_text = html.unescape(re.sub(r"<[^<]+?>", "", q_raw)).strip() if q_raw else ""
-            q_image = str(q_info.get("image", "") or "").strip()
-
-            # Extract correct answers (texts, option images)
-            answers_list = item.get("answers", [])
-            correct_texts = []
-            if isinstance(answers_list, list):
-                for a in answers_list:
-                    if isinstance(a, dict):
-                        a_raw = a.get("text", "")
-                        a_img = a.get("image", "")
-                    elif isinstance(a, str):
-                        a_raw = a
-                        a_img = ""
-                    else:
-                        continue
-                    if a_raw:
-                        a_text = html.unescape(re.sub(r"<[^<]+?>", "", a_raw)).strip()
-                        if a_text and a_text not in correct_texts:
-                            correct_texts.append(a_text)
-                    if a_img:
-                        img_file = a_img.split("/")[-1].split("?")[0].strip()
-                        if img_file and img_file not in correct_texts:
-                            correct_texts.append(img_file)
-
-            if correct_texts:
-                # 1. Map by question text (if present)
-                if q_text:
-                    if q_text not in answers_db:
-                        answers_db[q_text] = []
-                    for t in correct_texts:
-                        if t not in answers_db[q_text]:
-                            answers_db[q_text].append(t)
-                elif q_image:
-                    img_file = q_image.split("/")[-1].split("?")[0].strip()
-                    answers_db[f"[Image: {img_file}]"] = list(correct_texts)
-                elif q_id:
-                    answers_db[f"[Question ID: {q_id}]"] = list(correct_texts)
-
-                # 2. Map directly by question ID (100% reliable for image questions!)
-                if q_id:
-                    answers_db[q_id] = list(correct_texts)
-                    answers_db[f"id:{q_id}"] = list(correct_texts)
-
-                # 3. Map by question image URL / filename
-                if q_image:
-                    img_file = q_image.split("/")[-1].split("?")[0].strip()
-                    if img_file:
-                        answers_db[f"img:{img_file}"] = list(correct_texts)
-
-        if not answers_db:
-            raise Exception("Failed to parse question-answer pairs from Quizit")
+        answers_db = parse_quizit_answers(data)
 
         _completed_pins[clean_pin] = answers_db
         return answers_db
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            _quizit_sign_in_required = True
+            raise ValueError("Quizit requires sign-in to a Quizit account. Use the signed-in browser fallback.") from e
+        raise ValueError(f"Quizit API error: HTTP {e.code}") from e
     except Exception as e:
         raise Exception(f"Quizit API error: {e}")
     finally:
@@ -181,110 +230,346 @@ def fetch_quizit_answers(pin: str) -> dict[str, list[str]]:
 
 # ─── API 2: Wayground Direct API (_quizserver) ──────────────────
 
-def fetch_api_answers(quiz_id: str) -> dict[str, list[str]]:
-    """
-    Fetch raw quiz data from Wayground API and compile answers_db.
-    Requires a valid 24-char MongoDB ObjectId quiz_id.
-    """
-    clean_id = quiz_id.strip()
-    url = f"https://wayground.com/_quizserver/main/v2/quiz/{clean_id}?convertQuestions=false&includeFsFeatures=true&sanitize=read&questionMetadata=true&includeUserHydratedVariants=true"
+def _clean_text(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"<br\s*/?>|</p>|</div>", " ", value, flags=re.I)
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", "", text)).split())
 
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-        },
-    )
 
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP {response.status}")
-            data = json.loads(response.read().decode())
-    except Exception as e:
-        raise Exception(f"API fetch failed: {e}")
+def _get_questions(payload: dict) -> list[dict]:
+    """Accept quizserver lists and game API question maps, excluding placeholders."""
+    containers = [payload]
+    data = payload.get("data")
+    if isinstance(data, dict):
+        containers.append(data)
+    for container in list(containers):
+        for key in ("room", "quiz"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+                if isinstance(value.get("info"), dict):
+                    containers.append(value["info"])
+    for container in containers:
+        questions = container.get("questions")
+        if isinstance(questions, dict):
+            real_questions = [dict(q, _id=q.get("_id") or q.get("id") or qid)
+                              for qid, q in questions.items() if isinstance(q, dict)]
+            if real_questions:
+                return real_questions
+        if isinstance(questions, list):
+            real_questions = [q for q in questions if isinstance(q, dict)]
+            if real_questions:
+                return real_questions
+    return []
 
-    quiz_data = data.get("data", {}).get("quiz", {})
-    info_data = quiz_data.get("info", {})
-    if not info_data:
-        raise Exception("Invalid API response format (missing 'info')")
 
-    answers_db: dict[str, list[str]] = {}
-    questions = info_data.get("questions", [])
-    for q in questions:
-        q_id = str(q.get("_id") or q.get("id") or "").strip()
-        q_struct = q.get("structure", {})
-        q_query = q_struct.get("query", {})
-        q_text_raw = q_query.get("text", "")
-        q_text = html.unescape(re.sub(r"<[^<]+?>", "", q_text_raw)).strip() if q_text_raw else ""
+def _media_urls(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(media["url"]) for media in value
+            if isinstance(media, dict) and media.get("url")]
 
-        # Extract image if present
-        q_media = q_query.get("media", [])
-        q_image = ""
-        if isinstance(q_media, list) and len(q_media) > 0 and isinstance(q_media[0], dict):
-            q_image = q_media[0].get("url", "")
 
-        options_raw = q_struct.get("options", [])
-        ans_raw = q_struct.get("answer")
-        ans_indices = []
-        if isinstance(ans_raw, int):
-            ans_indices = [ans_raw]
-        elif isinstance(ans_raw, list):
-            ans_indices = ans_raw
-
-        correct_texts = []
-        for idx in ans_indices:
-            try:
-                idx = int(idx)
-            except ValueError:
+def _blank_answer_texts(structure: dict) -> list[str]:
+    """Resolve explicit BLANK target/option IDs; choose one accepted text per blank."""
+    answer = structure.get("answer")
+    targets = structure.get("targets")
+    options = structure.get("options")
+    if not all(isinstance(value, list) and value for value in (answer, targets, options)):
+        return []
+    target_ids = [target.get("id") for target in targets if isinstance(target, dict)]
+    if len(target_ids) != len(targets) or not all(isinstance(target, str) and target for target in target_ids):
+        return []
+    if len(set(target_ids)) != len(target_ids):
+        return []
+    query = structure.get("query") or {}
+    query_text = query.get("text", "") if isinstance(query, dict) else ""
+    query_targets = re.findall(r"<blank\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']", query_text, re.I)
+    if query_targets:
+        if len(query_targets) != len(target_ids) or set(query_targets) != set(target_ids):
+            return []
+        target_ids = query_targets
+    by_target = {}
+    for item in answer:
+        if not isinstance(item, dict) or item.get("targetId") not in target_ids:
+            return []
+        target_id = item["targetId"]
+        if target_id in by_target:
+            return []
+        ids = item.get("optionId")
+        if isinstance(ids, str):
+            ids = [ids]
+        if not isinstance(ids, list) or not ids or not all(isinstance(option_id, str) for option_id in ids):
+            return []
+        target = next(target for target in targets if target["id"] == target_id)
+        references = target.get("optionId")
+        if references is not None:
+            if not isinstance(references, list) or not all(isinstance(reference, str) for reference in references):
+                return []
+            if not set(ids).issubset(references):
+                return []
+        by_target[target_id] = ids
+    options_by_id = {}
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        for option_id in (option.get("id"), option.get("_id")):
+            if not isinstance(option_id, str) or not option_id:
                 continue
+            if option_id in options_by_id and options_by_id[option_id] != option:
+                return []
+            options_by_id[option_id] = option
+    texts = []
+    for target_id in target_ids:
+        ids = by_target.get(target_id, [])
+        if not ids or any(option_id not in options_by_id for option_id in ids):
+            return []
+        accepted = [_clean_text(options_by_id[option_id].get("text")) for option_id in ids]
+        accepted = [text for text in accepted if text]
+        if not accepted:
+            return []
+        # Multiple IDs for one target are alternative accepted spellings,
+        # whereas multiple targets are separate inputs in question order.
+        texts.append(accepted[0])
+    return texts
 
-            if 0 <= idx < len(options_raw):
-                opt = options_raw[idx]
-                opt_text_raw = opt.get("text", "")
-                if opt_text_raw:
-                    opt_text = html.unescape(re.sub(r"<[^<]+?>", "", opt_text_raw)).strip()
-                    if opt_text and opt_text not in correct_texts:
-                        correct_texts.append(opt_text)
 
-                # Option image
-                opt_media = opt.get("media", [])
-                if isinstance(opt_media, list) and len(opt_media) > 0 and isinstance(opt_media[0], dict):
-                    opt_img = opt_media[0].get("url", "")
-                    if opt_img:
-                        img_file = opt_img.split("/")[-1].split("?")[0].strip()
-                        if img_file and img_file not in correct_texts:
-                            correct_texts.append(img_file)
-
-                # Store index directly as fallback only if no text or image exists
-                if not correct_texts:
-                    correct_texts.append(f"option-{idx}")
-                    correct_texts.append(f"index:{idx}")
-
-        if correct_texts:
-            if q_text:
-                if q_text not in answers_db:
-                    answers_db[q_text] = []
-                for t in correct_texts:
-                    if t not in answers_db[q_text]:
-                        answers_db[q_text].append(t)
-            elif q_image:
-                img_file = q_image.split("/")[-1].split("?")[0].strip()
-                answers_db[f"[Image: {img_file}]"] = list(correct_texts)
-            elif q_id:
-                answers_db[f"[Question ID: {q_id}]"] = list(correct_texts)
-
-            if q_id:
-                answers_db[q_id] = list(correct_texts)
-                answers_db[f"id:{q_id}"] = list(correct_texts)
-
-            if q_image:
-                img_file = q_image.split("/")[-1].split("?")[0].strip()
-                if img_file:
-                    answers_db[f"img:{img_file}"] = list(correct_texts)
-
+def parse_wayground_answers(payload: dict) -> dict[str, list[str]]:
+    """Only use explicit server answer keys; options alone are never answers."""
+    answers_db = AnswerDatabase()
+    for q in _get_questions(payload):
+        structure = q.get("structure")
+        if not isinstance(structure, dict) or "answer" not in structure:
+            continue
+        answer = structure["answer"]
+        if answer is None or isinstance(answer, bool):
+            continue
+        query = structure.get("query") or {}
+        if not isinstance(query, dict):
+            query = {}
+        q_text = _clean_text(query.get("text"))
+        q_id = str(q.get("_id") or q.get("id") or "").strip()
+        options = structure.get("options") or []
+        if not isinstance(options, list):
+            options = []
+        values = answer if isinstance(answer, list) else [answer]
+        kind = str(q.get("type") or structure.get("kind") or "").upper()
+        correct_texts = _blank_answer_texts(structure) if kind == "BLANK" else []
+        for value in values if kind != "BLANK" else []:
+            option_values = []
+            if isinstance(value, bool):
+                continue
+            if kind in ("FIB", "FITB") and isinstance(value, str):
+                option_values = [_clean_text(value)]
+            elif isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+                index = int(value)
+                if not 0 <= index < len(options) or not isinstance(options[index], dict):
+                    continue
+                option = options[index]
+                text = _clean_text(option.get("text"))
+                if text:
+                    option_values.append(text)
+                for image in _media_urls(option.get("media")):
+                    filename = urlparse(image).path.rsplit("/", 1)[-1]
+                    if filename:
+                        option_values.append(filename)
+                if not option_values:
+                    option_values = [f"option-{index}", f"index:{index}"]
+            for text in option_values:
+                if text and text not in correct_texts:
+                    correct_texts.append(text)
+        if not correct_texts:
+            continue
+        images = _media_urls(query.get("media"))
+        option_info = []
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_images = _media_urls(option.get("media"))
+            option_info.append({"text": _clean_text(option.get("text")),
+                                "img_src": option_images[0] if option_images else ""})
+        answers_db.add_question(q_text, correct_texts, qid=q_id, images=images, options=option_info)
     return answers_db
+
+
+def _fetch_quiz_payload(quiz_id: str) -> dict:
+    clean_id = quiz_id.strip()
+    if not is_valid_quiz_id(clean_id):
+        raise ValueError("The Quiz API requires a 24-character quiz ID")
+    url = f"https://wayground.com/_quizserver/main/v2/quiz/{clean_id}?convertQuestions=false&includeFsFeatures=true&sanitize=read&questionMetadata=true&includeUserHydratedVariants=true"
+    return _request_json(url)
+
+
+def fetch_api_answers(quiz_id: str) -> dict[str, list[str]]:
+    """Fetch explicit answer keys from a public quiz with a MongoDB ObjectId."""
+    return parse_wayground_answers(_fetch_quiz_payload(quiz_id))
+
+
+def _game_resource_metadata(room_hash: str) -> dict:
+    """Read the library title even when the game exposes an opaque quiz ID."""
+    payload = _request_json(f"https://wayground.com/_gameapi/main/public/v1/students/games/{room_hash}")
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        return {}
+    quizzes = data.get("quizzes") or {}
+    items = data.get("items") or []
+    if not isinstance(items, list) or not isinstance(quizzes, dict):
+        return {}
+    for item in items:
+        if not isinstance(item, dict) or item.get("_id") != room_hash:
+            continue
+        quiz_id = item.get("quizId")
+        quiz = quizzes.get(quiz_id) if isinstance(quiz_id, str) else None
+        return {"quiz_id": quiz_id,
+                "name": _clean_text(quiz.get("name")) if isinstance(quiz, dict) else ""}
+    return {}
+
+
+def _verified_quiz_answers(game_questions: list[dict], quiz_payload: dict) -> dict[str, list[str]]:
+    """Accept library keys only for the same question IDs and unchanged content."""
+    if not game_questions:
+        return {}
+    source_questions = {}
+    for source_question in _get_questions(quiz_payload):
+        qid = str(source_question.get("_id") or source_question.get("id") or "")
+        if not qid or qid in source_questions:
+            return {}
+        source_questions[qid] = source_question
+    selected = []
+    seen_ids = set()
+    for game_question in game_questions:
+        qid = str(game_question.get("_id") or game_question.get("id") or "")
+        if not qid or qid in seen_ids or qid not in source_questions:
+            return {}
+        seen_ids.add(qid)
+        source_question = source_questions[qid]
+        game_structure = game_question.get("structure")
+        source_structure = source_question.get("structure")
+        if not isinstance(game_structure, dict) or not isinstance(source_structure, dict):
+            return {}
+        # These fields include question/option text, media and option IDs.
+        # Matching IDs alone would miss an edited question or reordered options.
+        if any(game_structure.get(key) != source_structure.get(key)
+               for key in ("query", "kind")):
+            return {}
+        if game_question.get("type") != source_question.get("type"):
+            return {}
+        blank = (game_question.get("type") or game_structure.get("kind")) == "BLANK"
+        if blank:
+            # BLANK options contain the answers themselves and are stripped from
+            # the game response. The unchanged targets retain their option IDs.
+            targets = game_structure.get("targets")
+            if not targets or targets != source_structure.get("targets"):
+                return {}
+            if game_question.get("ver") != source_question.get("ver"):
+                return {}
+        if game_structure.get("options") != source_structure.get("options"):
+            if not blank or game_structure.get("options") not in (None, []):
+                return {}
+        selected.append(source_question)
+    answers = parse_wayground_answers({"questions": selected})
+    return answers if all(f"id:{qid}" in answers for qid in seen_ids) else {}
+
+
+def _search_public_quizzes(title: str) -> list[dict]:
+    """Use the same public library search endpoint as the teacher panel."""
+    session_id = str(uuid.uuid4())
+    payload = {
+        "query": title, "queryId": str(uuid.uuid4()), "sessionId": session_id,
+        "page": "explore-ssr", "source": "HeroSearchBar", "from": 0, "size": 10,
+        "includeQuestions": False, "includeSources": ["questionTypes"],
+        "sortBy": {"key": "_score", "order": "desc"},
+        "filters": {"contentTypes": ["quiz"]},
+    }
+    response = _request_json(
+        "https://wayground.com/_sserverv2/main/v3/search/public?includeCollections=false",
+        payload, {"X-Q-Sessionid": session_id},
+    )
+    data = response.get("data") or {}
+    hits = data.get("hits") if isinstance(data, dict) else None
+    return [hit for hit in hits if isinstance(hit, dict)] if isinstance(hits, list) else []
+
+
+def _fetch_library_answers(title: str, game_questions: list[dict]) -> dict[str, list[str]]:
+    if not title or not game_questions:
+        return {}
+    log_step(f"Searching the public library for the original quiz: {title}")
+    candidates = _search_public_quizzes(title)
+    candidates.sort(key=lambda hit: (
+        _clean_text(hit.get("name")).casefold() != title.casefold(),
+        hit.get("noOfQuestions") != len(game_questions),
+    ))
+    tried = set()
+    for candidate in candidates:
+        quiz_id = candidate.get("quizId")
+        if not is_valid_quiz_id(quiz_id) or quiz_id in tried:
+            continue
+        count = candidate.get("noOfQuestions")
+        if isinstance(count, int) and count < len(game_questions):
+            continue
+        if len(tried) >= 5:
+            break
+        tried.add(quiz_id)
+        try:
+            answers = _verified_quiz_answers(game_questions, _fetch_quiz_payload(quiz_id))
+        except Exception:
+            continue
+        if answers:
+            log_step(f"Public quiz verified against all {len(game_questions)} game questions (Quiz ID: {quiz_id})")
+            return answers
+    return {}
+
+
+def fetch_game_answers(identifier: str) -> dict[str, list[str]]:
+    """Read game questions without joining a player or submitting an answer."""
+    clean = str(identifier).strip()
+    quiz_id = None
+    if is_valid_game_pin(clean):
+        response = _request_json("https://wayground.com/play-api/v5/checkRoom", {"roomCode": clean})
+        room = response.get("room") or response.get("data", {}).get("room") or {}
+        if not isinstance(room, dict):
+            raise ValueError("Game API returned an invalid room")
+        answers = parse_wayground_answers({"room": room})
+        if answers:
+            return answers
+        room_hash = str(room.get("hash") or "").strip()
+        quiz_id = room.get("quizId")
+    else:
+        room_hash = clean
+    if not ROOM_HASH_REGEX.fullmatch(room_hash):
+        raise ValueError("Game API did not return a valid room hash")
+    payload = _request_json("https://wayground.com/play-api/v4/getQuestions", {"roomHash": room_hash})
+    answers = parse_wayground_answers(payload)
+    if answers:
+        return answers
+    questions = _get_questions(payload)
+    # Some games expose a public quiz ID. Opaque 64-character IDs cannot be
+    # sent to quizserver (it returns HTTP 400), so do not treat them as ObjectIds.
+    try:
+        metadata = _game_resource_metadata(room_hash)
+    except Exception:
+        metadata = {}
+    if not is_valid_quiz_id(quiz_id):
+        quiz_id = metadata.get("quiz_id")
+    if is_valid_quiz_id(quiz_id):
+        try:
+            quiz_payload = _fetch_quiz_payload(quiz_id)
+            answers = (_verified_quiz_answers(questions, quiz_payload) if questions
+                       else parse_wayground_answers(quiz_payload))
+            if answers:
+                return answers
+        except Exception as exc:
+            log_step(f"Public quiz lookup: {exc}")
+    try:
+        answers = _fetch_library_answers(metadata.get("name", ""), questions)
+        if answers:
+            return answers
+    except Exception as exc:
+        log_step(f"Public library lookup: {exc}")
+    if questions:
+        raise ValueError(f"Game API returned {len(questions)} questions, but no supported answer keys. Correct answers may be hidden by the server.")
+    raise ValueError("Game API returned no questions or answer keys")
 
 
 # ─── Resolution Helpers ─────────────────────────────────────────
@@ -351,6 +636,9 @@ def resolve_hash_to_quiz_id(room_hash: str) -> str | None:
                         qid = items[0].get("quizId")
                         if is_valid_quiz_id(qid):
                             return qid
+                        # The legacy domain exposes the same opaque ID. It is
+                        # not a transport failure and cannot be resolved there.
+                        return None
         except Exception:
             continue
 
@@ -411,196 +699,133 @@ def extract_quiz_id_from_url(url: str) -> str | None:
 
 # ─── Unified Identifier Resolver ────────────────────────────────
 
-def fetch_answers_by_any_identifier(identifier: str) -> tuple[dict[str, list[str]] | None, str]:
-    """
-    Given ANY user input (URL, Game PIN, Room Hash, or Quiz ID), attempt
-    all possible resolution paths and return (answers_db, source_description).
-    """
-    clean = str(identifier).strip()
+def _classify_identifier(identifier: str) -> tuple[str, str]:
+    clean = str(identifier or "").strip()
     if not clean:
-        return None, ""
-
-    # Case 1: URL input (e.g. https://wayground.com/join?gc=665058)
-    if "wayground.com" in clean or "quizizz.com" in clean or clean.startswith("http"):
-        # Check game code (?gc=XXXXXX)
-        m_gc = re.search(r"[?&]gc=(\d+)", clean)
-        if m_gc and _allow_quizit_bot:
-            pin = m_gc.group(1)
-            try:
-                db = fetch_quizit_answers(pin)
-                if db:
-                    return db, f"Quizit API (Game PIN: {pin} from URL)"
-            except Exception:
-                pass
-
-        # Check path ObjectId (/(quiz|admin/quiz|pre-game)/<24-hex>)
-        m_path = re.search(r"/(?:quiz|admin/quiz|pre-game)/([a-fA-F0-9]{24})", clean)
-        if m_path:
-            qid = m_path.group(1)
-            try:
-                db = fetch_api_answers(qid)
-                if db:
-                    return db, f"Wayground Direct API (Quiz ID: {qid})"
-            except Exception:
-                pass
-
-        # Check join path room hash (/join/<hash>)
-        m_join_hash = re.search(r"/join/([a-zA-Z0-9_-]{10,})", clean)
-        if m_join_hash:
-            clean = m_join_hash.group(1)
-
-    # Case 2: Pure digits PIN (e.g. 665058)
-    digits = re.sub(r"\D", "", clean)
-    if 4 <= len(digits) <= 9:
-        if _allow_quizit_bot:
-            try:
-                db = fetch_quizit_answers(digits)
-                if db:
-                    return db, f"Quizit API (Game PIN: {digits})"
-            except Exception as e:
-                log_step(f"Quizit PIN fetch failed: {e}")
-        else:
-            log_step("⚠ Live game PIN detected, but Quizit Bot is disabled. (Live game answers require the bot).")
-
-    # Case 3: 24-character hexadecimal (Room Hash or MongoDB Quiz ID)
+        return "", ""
+    if clean.startswith(("http://", "https://")):
+        parsed = urlparse(clean)
+        host = (parsed.hostname or "").lower()
+        if not any(host == domain or host.endswith("." + domain)
+                   for domain in ("wayground.com", "quizizz.com")):
+            return "", ""
+        query = parse_qs(parsed.query)
+        pin = query.get("gc", [""])[0]
+        if is_valid_game_pin(pin):
+            return "pin", pin
+        quiz_id = query.get("quizId", [""])[0]
+        if is_valid_quiz_id(quiz_id):
+            return "quiz", quiz_id
+        quiz_match = re.search(r"/(?:quiz|admin/quiz|pre-game)/([a-fA-F0-9]{24})(?:/|$)", parsed.path)
+        if quiz_match:
+            return "quiz", quiz_match.group(1)
+        # /join/game/<encrypted session> is not a room hash.
+        hash_match = re.fullmatch(r"/join/([a-zA-Z0-9_-]{10,128})/?", parsed.path)
+        return ("hash", hash_match.group(1)) if hash_match else ("", "")
+    if is_valid_game_pin(clean):
+        return "pin", clean
     if is_valid_quiz_id(clean):
-        # 3a. Try treating as Room Hash (common in live games)
-        pin = resolve_hash_to_pin(clean)
-        if pin and _allow_quizit_bot:
-            try:
-                db = fetch_quizit_answers(pin)
-                if db:
-                    return db, f"Quizit API (Game PIN: {pin} via Room Hash)"
-            except Exception:
-                pass
+        return "id", clean
+    if ROOM_HASH_REGEX.fullmatch(clean) and not clean.isdigit():
+        return "hash", clean
+    return "", ""
 
-        # 3b. Try treating directly as Quiz ID on _quizserver
+
+def fetch_answers_by_any_identifier(identifier: str) -> tuple[dict[str, list[str]] | None, str]:
+    """Try Wayground's direct APIs first, then the permitted Quizit fallback."""
+    kind, value = _classify_identifier(identifier)
+    if not kind:
+        return None, ""
+    if kind in ("quiz", "id"):
         try:
-            db = fetch_api_answers(clean)
+            db = fetch_api_answers(value)
             if db:
-                return db, f"Wayground Direct API (Quiz ID: {clean})"
-        except Exception:
-            pass
-
-    # Case 4: Other room hash format (length >= 10)
-    if len(clean) >= 10 and not clean.isdigit() and _allow_quizit_bot:
-        pin = resolve_hash_to_pin(clean)
+                return db, f"Wayground Quiz API (Quiz ID: {value})"
+        except Exception as exc:
+            if kind == "quiz":
+                log_step(f"Direct Quiz API: {exc}")
+        if kind == "quiz":
+            return None, ""
+    try:
+        db = fetch_game_answers(value)
+        if db:
+            label = "PIN" if kind == "pin" else "Room Hash"
+            return db, f"Wayground Game API ({label}: {value})"
+    except Exception as exc:
+        log_step(f"Direct Game API: {exc}")
+    if _allow_quizit_bot and not _quizit_sign_in_required:
+        pin = value if kind == "pin" else resolve_hash_to_pin(value)
         if pin:
             try:
                 db = fetch_quizit_answers(pin)
                 if db:
-                    return db, f"Quizit API (Game PIN: {pin} via Room Hash)"
-            except Exception:
-                pass
-
+                    return db, f"Quizit API (Game PIN: {pin})"
+            except Exception as exc:
+                log_step(f"Quizit fallback failed: {exc}")
     return None, ""
 
 
 # ─── Network Interception ───────────────────────────────────────
 
 async def intercept_response(response):
-    """
-    Universal network listener to catch Wayground / Quizizz traffic:
-    Extracts Game PIN, Room Hash, or Quiz ID and pre-fetches answers.
-    Strictly debounced: will never trigger duplicate Quizit bot requests.
-    """
+    """Capture supplied answer keys and identifiers without spawning a bot."""
     global _discovered_pin, _discovered_hash, _discovered_quiz_id
-
-    if _answers_ready_event.is_set():
+    parsed = urlparse(response.url or "")
+    host = (parsed.hostname or "").lower()
+    if not any(host == domain or host.endswith("." + domain)
+               for domain in ("wayground.com", "quizizz.com")):
         return
-
-    url = (response.url or "").lower()
-    if not ("wayground.com" in url or "quizizz.com" in url):
+    if not any(part in parsed.path for part in ("/play-api/", "/_gameapi/", "/_quizserver/")):
         return
-    if any(url.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".svg", ".css", ".woff", ".woff2", ".mp3"]):
+    if response.status != 200:
         return
-
-    # 1. Check request body for game code / roomCode
     try:
-        req = response.request
-        if req and req.method in ["POST", "PUT"]:
-            post_data = req.post_data
-            if post_data and len(post_data) < 20000:
-                try:
-                    p_json = json.loads(post_data)
-                    p_code = p_json.get("roomCode") or p_json.get("gameCode") or p_json.get("code")
-                    if p_code and str(p_code).isdigit():
-                        _discovered_pin = str(p_code)
-                        asyncio.create_task(_async_try_pin(_discovered_pin, source=f"Request payload ({url})"))
-                except Exception:
-                    pass
+        request = response.request
+        if request and request.method in ("POST", "PUT"):
+            raw = request.post_data
+            if raw and len(raw) < 20000:
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    pin = str(payload.get("roomCode") or payload.get("gameCode") or "")
+                    if is_valid_game_pin(pin):
+                        _discovered_pin = pin
+                    room_hash = payload.get("roomHash")
+                    if isinstance(room_hash, str) and ROOM_HASH_REGEX.fullmatch(room_hash):
+                        _discovered_hash = room_hash
     except Exception:
         pass
-
-    # 2. Check response body (only if pin wasn't already triggered)
-    if response.status == 200 and not _discovered_pin:
-        try:
-            content_type = response.headers.get("content-type", "")
-            if "application/json" in content_type or "text/json" in content_type:
-                body = await response.json()
-                if isinstance(body, dict):
-                    room = body.get("room") or body.get("data", {}).get("room") or {}
-                    if isinstance(room, dict):
-                        # Extract PIN
-                        r_code = room.get("code") or room.get("roomCode")
-                        if r_code and str(r_code).isdigit():
-                            _discovered_pin = str(r_code)
-                            asyncio.create_task(_async_try_pin(_discovered_pin, source="Room response code"))
-
-                        # Extract Hash
-                        r_hash = room.get("hash")
-                        if r_hash and len(str(r_hash)) >= 10 and not _discovered_pin:
-                            _discovered_hash = str(r_hash)
-                            asyncio.create_task(_async_try_hash(_discovered_hash, source="Room response hash"))
-
-                    # Check items array (students/games/{hash})
-                    items = body.get("data", {}).get("items", []) or body.get("items", [])
-                    if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
-                        g_code = items[0].get("gameCode")
-                        if g_code and str(g_code).isdigit():
-                            _discovered_pin = str(g_code)
-                            asyncio.create_task(_async_try_pin(_discovered_pin, source="_gameapi items gameCode"))
-        except Exception:
-            pass
-
-
-async def _async_try_pin(pin: str, source: str = "Network"):
-    """Background task to fetch answers from detected PIN (single-flight)."""
-    global _in_progress_pins, _completed_pins, _allow_quizit_bot
-
-    if not _allow_quizit_bot:
-        return
-    if _answers_ready_event.is_set():
-        return
-
-    clean_pin = re.sub(r"\D", "", str(pin).strip())
-    if clean_pin in _in_progress_pins or clean_pin in _completed_pins:
-        return
-
     try:
-        loop = asyncio.get_event_loop()
-        db = await loop.run_in_executor(None, fetch_quizit_answers, clean_pin)
-        if db:
-            _set_answers(db, source=f"Quizit API (PIN: {clean_pin} from {source})")
-            log_info(f"✅ Auto-captured answers via PIN {clean_pin} [{source}]")
-    except Exception:
-        pass
-
-
-async def _async_try_hash(room_hash: str, source: str = "Network"):
-    """Background task to resolve hash and fetch answers (single-flight)."""
-    global _allow_quizit_bot
-
-    if not _allow_quizit_bot:
-        return
-    if _answers_ready_event.is_set():
-        return
-
-    try:
-        loop = asyncio.get_event_loop()
-        pin = await loop.run_in_executor(None, resolve_hash_to_pin, room_hash)
-        if pin:
-            await _async_try_pin(pin, source=f"Hash {room_hash}")
+        if "json" not in response.headers.get("content-type", "").lower():
+            return
+        body = await response.json()
+        if not isinstance(body, dict):
+            return
+        # Do not skip JSON after discovering a PIN: subsequent getQuestions
+        # and quizserver responses are where the actual keys can arrive.
+        answers = parse_wayground_answers(body)
+        if answers:
+            _set_answers(answers, "Wayground API (Browser response)")
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        room = body.get("room") or data.get("room") or {}
+        if isinstance(room, dict):
+            pin = str(room.get("code") or room.get("roomCode") or "")
+            if is_valid_game_pin(pin):
+                _discovered_pin = pin
+            room_hash = room.get("hash") or body.get("roomHash")
+            if isinstance(room_hash, str) and ROOM_HASH_REGEX.fullmatch(room_hash):
+                _discovered_hash = room_hash
+            if is_valid_quiz_id(room.get("quizId")):
+                _discovered_quiz_id = room["quizId"]
+        items = data.get("items") or body.get("items") or []
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            item = items[0]
+            if is_valid_game_pin(str(item.get("gameCode") or "")):
+                _discovered_pin = str(item["gameCode"])
+            if is_valid_quiz_id(item.get("quizId")):
+                _discovered_quiz_id = item["quizId"]
+        quiz = data.get("quiz") or {}
+        if isinstance(quiz, dict) and is_valid_quiz_id(quiz.get("_id")):
+            _discovered_quiz_id = quiz["_id"]
     except Exception:
         pass
 
@@ -690,80 +915,48 @@ async def extract_identifiers_from_page(page) -> dict:
 # ─── Master Answer Retrieval Function ───────────────────────────
 
 async def retrieve_answers(page, quiz_input: str | None = None, timeout: float = 6.0) -> tuple[dict[str, list[str]] | None, str]:
-    """
-    Master coordinator to retrieve answers using all available channels:
-    1. If answers were already captured by network listener -> return immediately.
-    2. Try user-provided quiz_input (URL, PIN, Hash, or Quiz ID).
-    3. Check active browser URL (e.g. ?gc=665058).
-    4. Inspect page DOM & localStorage.
-    5. Wait for network listener (up to timeout seconds).
-    """
-    global _cached_answers_db, _cached_source
+    """Coordinate direct API lookup, captured responses, and optional fallbacks."""
+    attempted: set[tuple[str, str]] = set()
 
-    # 1. Already ready?
+    async def try_identifier(identifier):
+        key = _classify_identifier(identifier)
+        if not key[0] or key in attempted:
+            return None, ""
+        attempted.add(key)
+        db, source = await asyncio.to_thread(fetch_answers_by_any_identifier, identifier)
+        if db:
+            _set_answers(db, source)
+        return db, source
+
     if _answers_ready_event.is_set() and _cached_answers_db:
         return _cached_answers_db, _cached_source
-
-    # 2. Check user input
-    if quiz_input:
-        loop = asyncio.get_event_loop()
-        db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, quiz_input)
+    for identifier in (quiz_input, page.url):
+        db, source = await try_identifier(identifier)
         if db:
-            _set_answers(db, src)
-            return db, src
+            return db, source
 
-    # 3. Check active page URL
-    try:
-        current_url = page.url or ""
-        if current_url:
-            loop = asyncio.get_event_loop()
-            db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, current_url)
-            if db:
-                _set_answers(db, src)
-                return db, src
-    except Exception:
-        pass
-
-    # 4. In-page DOM / localStorage inspection
-    page_info = await extract_identifiers_from_page(page)
-    loop = asyncio.get_event_loop()
-
-    if page_info.get("pin"):
-        db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, page_info["pin"])
-        if db:
-            _set_answers(db, f"Page DOM ({src})")
-            return db, _cached_source
-
-    if page_info.get("hash"):
-        db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, page_info["hash"])
-        if db:
-            _set_answers(db, f"Page Storage ({src})")
-            return db, _cached_source
-
-    if page_info.get("quizId"):
-        db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, page_info["quizId"])
-        if db:
-            _set_answers(db, f"Page Storage ({src})")
-            return db, _cached_source
-
-    # 5. Wait for network listener while periodically re-checking page
-    elapsed = 0.0
-    step = 0.8
-    while elapsed < timeout:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
         if _answers_ready_event.is_set() and _cached_answers_db:
             return _cached_answers_db, _cached_source
-
-        await asyncio.sleep(step)
-        elapsed += step
-
-        # Periodic re-check of DOM / URL (SPA might have loaded room state)
-        page_info = await extract_identifiers_from_page(page)
-        if page_info.get("pin"):
-            db, src = await loop.run_in_executor(None, fetch_answers_by_any_identifier, page_info["pin"])
+        info = await extract_identifiers_from_page(page)
+        # A captured PIN and room hash refer to the same game: avoid retrying
+        # the failed PIN through its hash on every DOM polling iteration.
+        pin = info.get("pin") or _discovered_pin
+        candidates = [pin, info.get("quizId") or _discovered_quiz_id]
+        if not pin:
+            candidates.append(info.get("hash") or _discovered_hash)
+        for identifier in candidates:
+            db, source = await try_identifier(identifier)
             if db:
-                _set_answers(db, f"Page DOM Delayed ({src})")
-                return db, _cached_source
-
+                return db, source
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(_answers_ready_event.wait(), timeout=min(0.8, remaining))
+        except asyncio.TimeoutError:
+            pass
     return _cached_answers_db, _cached_source
 
 

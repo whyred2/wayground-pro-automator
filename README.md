@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v3.0.1</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v3.2</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Smart Hybrid AI Solver & Direct API Interception
     <br />
@@ -29,6 +29,7 @@
 
 ### Table of Contents
 
+- [What's New in v3.2](#whats-new-in-v32)
 - [What's New in v3.0.1](#whats-new-in-v301)
 - [What's New in v3.0](#whats-new-in-v30)
 - [What's New in v2.4](#whats-new-in-v24)
@@ -40,6 +41,16 @@
 - [Quick Start](#quick-start)
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
+- [Running Tests](#running-tests)
+
+### What's New in v3.2
+
+- **Separate keys for repeated questions** — Questions with identical wording retain their own IDs, answers, and option sets. A quiz with 51 questions now displays 51 rows instead of grouping repeated prompts. Matching uses question IDs first, then the visible option set when IDs are unavailable; option order can be shuffled.
+- **Direct game lookup and verified public quiz keys** — Resolves game PINs, room hashes, quiz IDs, and URLs through the Wayground API. If a game hides its keys, the public library is searched and candidates are checked against the game's question IDs, content, and options. BLANK questions resolve explicit target/option mappings, including multiple blanks and accepted spellings.
+- **No fabricated fallback answers** — Missing keys, ambiguous matches, incomplete blank answers, and failed AI requests stop automation before submission. The program no longer substitutes generic `yes` or `answer` fallbacks, repeats a partial answer across blanks, or selects a random option when no answer was found. Waiting timeouts do not count as test completion.
+- **AI selection with real availability checks** — Choose Smart Hybrid, Qwen 3.8 27B via Groq, GPT-OSS 120B / 20B, a configured personal API, or no AI before starting. Each engine is checked with a test request. Qwen can use Groq through the gateway without a personal key; GPT-OSS can use the gateway when a Groq key is not configured. GPT-OSS presets are text-only.
+- **Stable CheatNetwork fallback** — Offers existing answer tabs after target API lookup fails and preserves user-owned tabs. Waits for `Downloading answers...` for up to five minutes without refreshing; persistent `Not logged in` pauses for manual sign-in. Closed tabs and browsers are handled without continuing automation.
+- **Quizit sign-in flow and regression checks** — Optional Quizit Standard fallback uses its website's normal account sign-in and captures the requested result. Unsolved responses are rejected, duplicate requests are avoided, and `--no-bot` disables this fallback. The `tests/` directory covers answer parsing, repeated prompts, navigation, AI failures, tabs, and gateway routing.
 
 ### What's New in v3.0.1
 
@@ -88,10 +99,10 @@
 
 ### Features
 
-- **Hybrid Answer Engine** — Intercepts the Wayground API in the background for 100% accurate answers instantly. If that fails, auto-falls back to scraping `cheatnetwork.eu` (opened lazily, only when needed).
-- **Smart Image-Variant Handling** — Automatically groups answers for graphically distinct questions with identical text to maximize accuracy.
-- **Graceful Fallbacks** — If a question's options change entirely, the script intelligently selects a random choice instead of crashing.
-- **Dual-mode operation** — Launch a new browser (recommended) or attach to your existing Edge/Chrome session (preserves logins).
+- **Hybrid Answer Engine** — Retrieves explicit Wayground API keys, checks public quiz candidates against the game, and supports captured network responses, optional Quizit Standard, and CheatNetwork fallback. AI can solve missing questions when enabled.
+- **Separate Question Records** — Repeated wording and image variants keep their own answers. IDs and visible option sets distinguish variants without merging their keys.
+- **Unresolved Questions Stop Automation** — If no complete answer is available, the current question is left unsubmitted with an explanation.
+- **Dual-mode operation** — Attach to Edge/Chrome (recommended in the interactive menu, preserves logins) or launch a new standalone browser.
 - **Human-like behavior** — Dynamic "thinking" delays based on character count (`min 10s + 0.05s/char`), randomized click logic, and jitter ±30%.
 - **Intentional errors** — Use `--wrong N` or answer interactively after seeing the question count to avoid a suspicious 100% score.
 - **Clean UI** — A fully revamped terminal UI with minimal spam, dynamic animated spinners, and clear testing phases.
@@ -102,14 +113,21 @@
 src/
 ├── main.py          # Entry point, CLI, interactive menu
 ├── config.py        # Constants, selectors, timing, colors, AI settings
+├── ai_setup.py      # AI selection and availability checks
 ├── ai_solver.py     # AI real-time solver (OpenAI SDK / Groq / Qwen, text & vision)
+├── answer_db.py     # Separate records for each question and answer key
+├── answer_tabs.py   # Existing CheatNetwork tabs and fallback ownership
 ├── ui.py            # Logging, Spinner, banners
 ├── browser.py       # Edge/Chrome detection & launch
 ├── api.py           # Network interception, Wayground API
+├── quizit.py        # Optional Quizit Standard browser sign-in/result flow
 ├── scraper.py       # CheatNetwork parsing (lazy fallback)
 ├── matching.py      # Exact / substring / fuzzy matching
 ├── automation.py    # Test automation loop, highlights, results
 └── tabs.py          # Tab picker (attach mode)
+
+tests/               # Python regression checks and Node.js gateway tests
+cloudflare-worker/   # AI gateway implementation and deployment configuration
 ```
 
 ### Installation
@@ -130,9 +148,9 @@ pip install -r requirements.txt
 # 2. Install Chromium browser for Playwright
 python -m playwright install chromium
 
-# 3. Configure API keys (for AI Solver)
+# 3. Optional: configure personal API keys or a custom gateway
 cp .env.example .env
-# Edit .env and paste your free Groq API key (from https://console.groq.com/keys)
+# Edit .env if using your own provider; the bundled gateway needs no personal key
 ```
 
 ### Quick Start
@@ -147,13 +165,13 @@ _(Or just run the `.exe` file)_
 
 **What happens:**
 
-1. Select Mode `1` (New browser — recommended).
-2. A Chromium browser window opens with Wayground.
+1. Select Mode `1` (Attach to Edge/Chrome — recommended), or `2` for a standalone browser.
+2. The browser opens or connects; select the Wayground test tab when prompted.
 3. Log into your account and navigate to the test waiting room.
 4. Go back to the console and press **Enter**.
-5. Select the AI engine: Smart Hybrid (Cloudflare / Groq), your personal API, GPT-OSS 120B / 20B on Groq, or no AI. Each engine shows **Available / Unavailable** after a test request, with the reason if unavailable. The GPT-OSS presets are text-only and use `GROQ_API_KEY` (or the configured personal API key when its endpoint is Groq).
-6. The script intercepts the test API, loads answers, and shows you the total question count.
-7. Choose how many questions to answer wrong (or press Enter for 100%).
+5. Select Smart Hybrid, Qwen through Groq, GPT-OSS 120B / 20B, a configured personal API, or no AI. Each engine shows **Available / Unavailable** after a test request. Qwen and GPT-OSS can use the bundled gateway without a personal key; a configured Groq key enables direct Groq requests for these presets.
+6. The program retrieves target API keys first, then offers fallbacks if needed. Existing CheatNetwork answer tabs can be selected without reloading them. Quizit Standard requires its own account; `--no-bot` disables it.
+7. Review the complete question list and choose how many questions to answer wrong (or press Enter for no deliberate mistakes).
 8. Automation begins!
 
 ### CLI Parameters
@@ -170,8 +188,9 @@ You can skip the interactive menu by providing arguments directly:
 | `--ai-base URL`           | Custom OpenAI API base URL                               | `https://api.groq.com/openai/v1`           |
 | `--attach`                | Attach to Edge/Chrome (auto-launch if needed)            | `False`                                    |
 | `--wrong N`               | Number of intentionally wrong answers                    | `0` (asks interactively if not set)        |
-| `-q, --quiz-input STR`    | Quiz URL or game PIN code for answer extraction          | `None`                                     |
-| `--no-bot`                | Disable Quizit solver bot in live games                  | `False`                                    |
+| `-q, --quiz-input STR`    | Game PIN, room hash, quiz ID, or supported URL for answer lookup | `None`                              |
+| `--no-bot`                | Disable optional Quizit Standard/Bot fallback             | `False`                                    |
+| `--port PORT`             | Browser debug port for attach mode                       | `9222`                                     |
 | `--test-url URL`          | URL of the test page (for normal mode)                   | `https://wayground.com`                    |
 | `--answers-url URL`       | URL of the answer key page (for fallback)                | `https://cheatnetwork.eu/services/quizizz` |
 
@@ -192,8 +211,9 @@ python src/main.py --attach --wrong 5
 
 #### Phase 1: Retrieving Answer Keys
 
-The script attaches a stealth listener to the browser's network layer. When you join the test, it instantly extracts the secret `quiz_id` from the hidden `/join` payload. It then queries the direct Wayground REST API for a 100% exact copy of the correct answers.
-_If the API fails, a CheatNetwork tab is opened automatically, answers are scraped, and the tab is closed — all without manual intervention._
+The program resolves the selected game's PIN or room hash and reads explicit keys from the Wayground Game API. When the server hides keys, it searches the public library and verifies a candidate against the game questions before using its answers. A listener on the selected test tab also captures answer keys supplied by normal browser responses. Keys are stored separately for each question, including repeated wording.
+
+If direct lookup fails, existing CheatNetwork answer tabs are offered as a fallback. Optional Quizit Standard may require sign-in to a Quizit account. CheatNetwork download dialogs are waited out without automatic refreshes; login notices pause for manual sign-in. Existing tabs stay open; only a temporary tab created by the program may be closed after successful retrieval.
 
 #### Phase 2: Test Automation
 
@@ -203,6 +223,23 @@ The script reads the screen and matches the prompt.
 2. Highlights the screen elements being processed.
 3. Solves Single-Select and Multi-Select (MSQ) questions.
 4. Injects deliberate failures if `--wrong` was requested.
+5. Tracks the live question number so consecutive identical prompts are treated as separate questions. Missing or ambiguous answers stop automation without submission; a waiting timeout does not report successful completion.
+
+### Running Tests
+
+From the project root with the Python dependencies installed:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Gateway tests additionally require Node.js:
+
+```powershell
+node --test tests/test_gateway.mjs
+```
+
+Commit `tests/` with the source changes. These regression checks are not included in the standalone `.exe`.
 
 ---
 
@@ -210,6 +247,7 @@ The script reads the screen and matches the prompt.
 
 ### Содержание
 
+- [Что нового в v3.2](#что-нового-в-v32)
 - [Что нового в v3.0.1](#что-нового-в-v301)
 - [Что нового в v3.0](#что-нового-в-v30)
 - [Что нового в v2.4](#что-нового-в-v24)
@@ -222,6 +260,16 @@ The script reads the screen and matches the prompt.
 - [Параметры запуска](#параметры-запуска)
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
+- [Запуск проверок](#запуск-проверок)
+
+### Что нового в v3.2
+
+- **Отдельные ключи повторяющихся вопросов** — Вопросы с одинаковым текстом сохраняют собственные ID, ответы и варианты. Тест из 51 вопроса отображается в 51 строке без группировки формулировок. Сначала используется ID; если его нет на странице, вопрос сопоставляется по набору вариантов, в том числе при их перемешивании.
+- **Прямой API игры и проверенные ключи публичных тестов** — Поддерживаются PIN игры, хеш комнаты, ID теста и ссылки. Если сервер скрывает ответы, программа ищет оригинал в публичной библиотеке и проверяет ID, содержимое и варианты вопросов. Для BLANK используются явные связи между пропусками и вариантами, включая несколько полей и допустимые написания.
+- **Остановка при отсутствии ответа** — Неоднозначные совпадения, неполные ключи и ошибки ИИ останавливают программу до отправки. Удалены запасные подстановки `yes` / `answer`, повторение одного ответа во всех пропусках и случайный выбор без найденного ключа. Таймаут ожидания не считается завершением теста.
+- **Выбор ИИ с проверкой доступности** — Перед тестом доступны Smart Hybrid, Qwen 3.8 27B через Groq, GPT-OSS 120B / 20B, настроенный личный API и отключение ИИ. Доступность проверяется пробным запросом. Qwen может использовать Groq через шлюз без личного ключа; GPT-OSS используют шлюз, если ключ Groq не настроен. Предустановки GPT-OSS работают с текстом.
+- **Стабильная работа CheatNetwork** — После неудачи прямого API можно выбрать уже открытую вкладку ответов. Пользовательские вкладки сохраняются. Окно `Downloading answers...` ожидается до пяти минут без перезагрузки; устойчивое `Not logged in` приостанавливает работу для ручного входа. Закрытие вкладки или браузера обрабатывается корректно.
+- **Авторизация Quizit и регрессионные проверки** — Дополнительный источник Quizit Standard использует обычный вход через сайт и получает результат его запроса. Результаты без полученных ключей не принимаются за ответы; повторные запросы предотвращены. `--no-bot` отключает этот источник. Папка `tests/` содержит проверки парсинга, повторов, переходов, ошибок ИИ, вкладок и маршрутизации шлюза.
 
 ### Что нового в v3.0.1
 
@@ -267,10 +315,10 @@ The script reads the screen and matches the prompt.
 
 ### Возможности
 
-- **Гибридный движок** — Скрипт перехватывает сетевой трафик (Wayground API) в фоне и достаёт 100% точные ответы за долю секунды. При неудаче автоматически открывает CheatNetwork, парсит ответы и закрывает вкладку.
-- **Умная обработка картинок** — Аккумулирует и группирует варианты ответов для вопросов с одинаковым текстом, но разными картинками.
-- **Не падает при ошибках (Graceful Fallback)** — Если варианты ответов в тесте мутировали до неузнаваемости, скрипт не крашится, а делает "умную" случайную догадку и идёт дальше.
-- **Два режима работы** — Новый браузер (рекомендуется) или подключение к вашему Edge/Chrome (сохраняет логины).
+- **Гибридный движок** — Получает явные ключи из API Wayground, проверяет публичные тесты по вопросам игры и поддерживает ответы из сетевых запросов, дополнительный источник Quizit Standard и CheatNetwork. При включённом ИИ он может решить недостающий вопрос.
+- **Отдельные записи вопросов** — Повторяющиеся формулировки и вопросы с картинками сохраняют собственные ответы. Варианты различаются по ID и набору ответов на экране без объединения ключей.
+- **Остановка при отсутствии ключа** — Если полный ответ не найден, вопрос остаётся неотправленным, а программа сообщает причину.
+- **Два режима работы** — Подключение к Edge/Chrome (рекомендуется в интерактивном меню, сохраняет логины) или новый отдельный браузер.
 - **Имитация человека** — Динамические задержки на чтение (`минимум 10 сек + 0.05 сек/символ`), хаотичные движения и jitter ±30%.
 - **Намеренные ошибки** — Используйте `--wrong N` или ответьте интерактивно после загрузки вопросов, чтобы не вызывать подозрений идеальным 100%.
 - **Чистый интерфейс консоли** — Анимированные загрузки, статусы фаз и аккуратный лог.
@@ -281,13 +329,21 @@ The script reads the screen and matches the prompt.
 src/
 ├── main.py          # Точка входа, CLI, интерактивное меню
 ├── config.py        # Константы, селекторы, тайминги, цвета
+├── ai_setup.py      # Выбор ИИ и проверка доступности
+├── ai_solver.py     # ИИ-решатель для текста и изображений
+├── answer_db.py     # Отдельная запись и ключ для каждого вопроса
+├── answer_tabs.py   # Выбор и сохранение вкладок CheatNetwork
 ├── ui.py            # Логирование, Spinner, баннер
 ├── browser.py       # Обнаружение и запуск Edge/Chrome
 ├── api.py           # Перехват сети, прямой API Wayground
+├── quizit.py        # Вход в Quizit Standard и получение результата через сайт
 ├── scraper.py       # Парсинг CheatNetwork (ленивый fallback)
 ├── matching.py      # Exact / substring / fuzzy matching
 ├── automation.py    # Цикл автоматизации, подсветка, результаты
 └── tabs.py          # Выбор вкладок (attach-режим)
+
+tests/               # Проверки Python и тесты шлюза на Node.js
+cloudflare-worker/   # Код ИИ-шлюза и настройки публикации
 ```
 
 ### Установка
@@ -308,9 +364,9 @@ pip install -r requirements.txt
 # 2. Установите браузер Chromium для Playwright
 python -m playwright install chromium
 
-# 3. Настройте API-ключ для ИИ-решателя (AI Solver)
+# 3. Необязательно: настройте личный API-ключ или собственный шлюз
 cp .env.example .env
-# Откройте .env и вставьте ваш бесплатный ключ Groq (получить на https://console.groq.com/keys)
+# Измените .env для своего провайдера; встроенный шлюз не требует личного ключа
 ```
 
 ### Быстрый старт
@@ -325,13 +381,13 @@ _(Или просто откройте файл `.exe`)_
 
 **Что произойдёт:**
 
-1. Выберите режим `1` (Новый браузер — рекомендуется).
-2. Откроется окно Chromium с сайтом Wayground.
+1. Выберите режим `1` (Подключение к Edge/Chrome — рекомендуется) или `2` для отдельного браузера.
+2. Браузер откроется или подключится; выберите вкладку теста Wayground, когда программа предложит.
 3. Авторизуйтесь под своим аккаунтом и перейдите на страницу ожидания теста.
 4. Вернитесь в консоль и нажмите **Enter**.
-5. Выберите ИИ: Smart Hybrid (Cloudflare / Groq), личный API, GPT-OSS 120B / 20B через Groq или «Без ИИ». Программа выполнит пробный запрос и покажет **Доступен / Недоступен** с причиной. Для личного API настройте ключ, модель и адрес в `.env` или аргументах запуска. GPT-OSS работают с текстом и используют `GROQ_API_KEY` (или ключ личного API, если его адрес указывает на Groq).
-6. Скрипт перехватит API, загрузит ответы и покажет общее количество вопросов.
-7. Укажите сколько вопросов ответить неправильно (или нажмите Enter для 100%).
+5. Выберите Smart Hybrid, Qwen через Groq, GPT-OSS 120B / 20B, настроенный личный API или отключение ИИ. Программа выполнит пробный запрос и покажет **Available / Unavailable** с причиной. Qwen и GPT-OSS могут использовать встроенный шлюз без личного ключа; настроенный ключ Groq позволяет этим предустановкам обращаться к Groq напрямую.
+6. Сначала программа получит ключи текущего теста через API. При неудаче предложит дополнительные источники, включая выбор открытой вкладки CheatNetwork без перезагрузки. Для Quizit Standard нужен отдельный аккаунт; `--no-bot` отключает этот источник.
+7. Просмотрите полный список вопросов и укажите количество намеренных ошибок (или нажмите Enter, чтобы их не делать).
 8. Автоматизация начнётся!
 
 ### Параметры запуска
@@ -347,9 +403,10 @@ _(Или просто откройте файл `.exe`)_
 | `--ai-model MODEL`       | Модель для решения (Groq / OpenAI)                     | `qwen/qwen3.8-27b`                         |
 | `--ai-base URL`          | Базовый URL OpenAI-совместимого API                     | `https://api.groq.com/openai/v1`           |
 | `--attach`               | Подключиться к Edge/Chrome (автозапуск при нужде)       | `False`                                    |
-| `--wrong N`              | Сделать N намеренных ошибок (иначе спросит в меню)      | `0` (100% правильных)                      |
-| `-q, --quiz-input STR`   | Ссылка на тест или PIN-код игры для выгрузки ответов    | `None`                                     |
-| `--no-bot`               | Отключить гостевого бота Quizit для live-игр            | `False`                                    |
+| `--wrong N`              | Сделать N намеренных ошибок (иначе спросит в меню)      | `0` (запрашивает, если не задано)            |
+| `-q, --quiz-input STR`   | PIN игры, хеш комнаты, ID теста или поддерживаемая ссылка | `None`                                  |
+| `--no-bot`               | Отключить дополнительный источник Quizit Standard/Bot  | `False`                                    |
+| `--port PORT`            | Порт отладки браузера для режима подключения            | `9222`                                     |
 | `--test-url URL`         | URL страницы теста                                      | `https://wayground.com`                    |
 | `--answers-url URL`      | URL сервиса ответов CheatNetwork (fallback)             | `https://cheatnetwork.eu/services/quizizz` |
 
@@ -367,14 +424,16 @@ python src/main.py --attach --wrong 6
 
 #### Выгрузка правильных ответов (Phase 1)
 
-Скрипт мониторит вкладку "Network" (Сеть) вашего браузера через протокол отладки. Во время входа в тест ловится скрытый запрос `/join`, из которого достаётся ID теста. Затем напрямую из закрытого API вытаскиваются все правильные ответы.
-_Если API не сработал, скрипт автоматически откроет вкладку CheatNetwork, спарсит ответы и закроет её — без вашего вмешательства._
+Программа определяет PIN или хеш комнаты выбранного теста и получает явные ключи через API игры Wayground. Если сервер скрывает ответы, программа ищет исходный тест в публичной библиотеке и проверяет найденный вариант по вопросам игры. Обработчик сетевых ответов выбранной вкладки также получает ключи, которые сервер передаёт браузеру. Каждый вопрос хранится отдельно, даже если формулировки повторяются.
+
+Если прямой поиск не дал результата, можно выбрать открытую вкладку CheatNetwork. Дополнительный источник Quizit Standard может потребовать входа в отдельный аккаунт Quizit. Окна загрузки CheatNetwork ожидаются без автоматической перезагрузки; сообщения об авторизации приостанавливают работу для ручного входа. Существующие вкладки остаются открытыми; после успешного получения ответов программа может закрыть только созданную ею временную вкладку.
 
 #### Решение (Phase 2)
 
 1. Вычисляет время на чтение человеком (`минимум 10 сек + 0.05 сек на символ`).
-2. Отыскивает правильную кнопку. При совпадении текстов (у задач с картинками) фильтрует несуществующие кнопки.
+2. Сопоставляет вопрос по ID или набору вариантов, выбирает правильные кнопки либо заполняет текстовые пропуски.
 3. В случае `--wrong` специально кликает на неправильный ответ N раз за весь тест.
+4. Учитывает номер вопроса, чтобы последовательные одинаковые формулировки не пропускались. Если ответ отсутствует или неоднозначен, останавливается до отправки. Таймаут ожидания не считается успешным завершением.
 
 ### Устранение проблем
 
@@ -387,12 +446,28 @@ _Если API не сработал, скрипт автоматически о�
 </details>
 
 <details>
-<summary><b>❌ [SKIP] Answer options changed or not found</b></summary>
+<summary><b>❌ Automation stopped at question ...</b></summary>
 
-**Причина:** Кнопки на экране не совпадают ни с одним ответом из базы (например, вопрос содержит сложное форматирование).
-**Решение:** Программа автоматически отработает эту исключительную ситуацию (угадает случайный ответ вместо того, чтобы зависнуть или "упасть"). Ничего делать не нужно!
+**Причина:** Нет полного ключа для вопроса, варианты не совпали с найденными ответами либо выбранный ИИ не вернул пригодный результат.
+**Решение:** Проверьте выбранную вкладку теста, PIN и источник ответов. При использовании ИИ проверьте его доступность. Загрузите ключи текущего теста и запустите программу снова. Вопрос остаётся неотправленным; случайные ответы не подставляются.
 
 </details>
+
+### Запуск проверок
+
+Из корня проекта с установленными зависимостями Python:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Для проверок шлюза дополнительно нужен Node.js:
+
+```powershell
+node --test tests/test_gateway.mjs
+```
+
+Папку `tests/` следует коммитить вместе с изменениями исходников. В готовый `.exe` эти проверки не включаются.
 
 <p align="center">
   <sub>Built with <a href="https://playwright.dev/python/">Playwright</a> · Python 3.10+</sub>
