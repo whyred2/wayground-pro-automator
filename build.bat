@@ -23,14 +23,8 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo [2/3] Compiling with PyInstaller...
-"%BUILD_PYTHON%" -m PyInstaller --noconfirm --onefile --clean ^
-  --name "WaygroundAutomator" ^
-  --icon "assets/icon.ico" ^
-  --version-file "assets/version_info.txt" ^
-  --collect-data playwright_stealth ^
-  --paths "src" ^
-  src/main.py
+echo [2/3] Compiling the desktop executable...
+"%BUILD_PYTHON%" scripts\build_windows.py
 
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -41,6 +35,6 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo [3/3] Build complete!
-echo Output file: dist\WaygroundAutomator.exe
+echo Output file: dist\^<version^>\WaygroundAutomator.exe
 echo ===================================================
 pause

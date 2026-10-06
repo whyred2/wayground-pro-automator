@@ -285,7 +285,8 @@ class ConnectionTests(unittest.TestCase):
             answers, _, _ = ai_solver.solve_fib_with_ai("1+1 = ___")
             self.assertEqual(answers, ["two"])
             for call in sdk.call_args_list:
-                self.assertEqual(call.kwargs, {"api_key":"new-key", "base_url":"https://new.example/v1"})
+                self.assertEqual(call.kwargs, {"api_key":"new-key", "base_url":"https://new.example/v1",
+                                              "timeout": 30.0, "max_retries": 0})
             for call in client.chat.completions.create.call_args_list:
                 self.assertEqual(call.kwargs["model"], "new-model")
             mcq.assert_not_called()

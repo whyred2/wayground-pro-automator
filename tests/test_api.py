@@ -332,14 +332,14 @@ class LibraryVerificationTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in fetch.call_args_list], [wrong_id, QUIZ_ID])
 
     def test_library_candidate_requests_are_bounded_and_deduplicated(self):
-        candidates = [{"quizId": f"{i:024x}", "name": "Title", "noOfQuestions": 1} for i in range(6)]
+        candidates = [{"quizId": f"{i:024x}", "name": "Title", "noOfQuestions": 1} for i in range(12)]
         candidates.insert(1, dict(candidates[0]))
         candidates.insert(0, {"quizId": "not-an-id", "name": "Title"})
         with patch.object(api, "_search_public_quizzes", return_value=candidates), \
                 patch.object(api, "_fetch_quiz_payload", side_effect=ValueError("unavailable")) as fetch:
             self.assertEqual(api._fetch_library_answers("Title", [hidden_question()]), {})
-        self.assertEqual(fetch.call_count, 5)
-        self.assertEqual(len({call.args[0] for call in fetch.call_args_list}), 5)
+        self.assertEqual(fetch.call_count, 10)
+        self.assertEqual(len({call.args[0] for call in fetch.call_args_list}), 10)
 
     def test_public_search_uses_anonymous_session_and_quiz_filter(self):
         with patch.object(api, "_request_json", return_value={"data": {"hits": [{"quizId": QUIZ_ID}, None]}}) as request:

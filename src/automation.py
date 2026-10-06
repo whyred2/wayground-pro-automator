@@ -7,6 +7,7 @@ import asyncio
 import random
 import base64
 import re
+import time
 
 from config import (
     SEL_CURRENT_QUESTION, SEL_CURRENT_QUESTION_INNER, SEL_QUESTION_MEDIA,
@@ -20,8 +21,12 @@ from config import (
     AI_MODEL,
 )
 from ui import log_info, log_found, log_progress, log_error, log_step, log_wrong
-from matching import find_answers, match_button_option, rank_and_match_buttons, get_display_questions, _option_signature
+from matching import (
+    find_answers, match_button_option, rank_and_match_buttons, get_display_questions,
+    requires_manual_response, _option_signature,
+)
 from ai_solver import solve_question_with_ai, solve_fib_with_ai, generate_plausible_wrong
+from runtime_control import ACTIVE_CONTROL, RunStopped, checkpoint, question_delay_seconds
 
 try:
     from playwright.async_api import TimeoutError as PlaywrightTimeout
@@ -41,6 +46,8 @@ def _get_active_ai_label() -> str:
 
 async def _safe_click(btn, description: str = "") -> bool:
     """Try to click a button; return True on success, False if element is stale/detached."""
+    if not await checkpoint(action=True):
+        return False
     try:
         await btn.click(timeout=3000)
         return True
@@ -52,6 +59,8 @@ async def _safe_click(btn, description: str = "") -> bool:
             return False
         # Fallback to JS click if Playwright actionability check times out or overlay intercepts
         try:
+            if not await checkpoint(action=True):
+                return False
             await btn.evaluate("el => el.click()")
             return True
         except Exception:
@@ -66,11 +75,7 @@ def calc_think_time(question_text: str) -> float:
     Longer questions → more time to read and think.
     Returns seconds with random jitter.
     """
-    length = len(question_text) if question_text else 25
-    base = MIN_THINK_SECONDS + length * THINK_PER_CHAR
-    jitter = base * random.uniform(-THINK_JITTER, THINK_JITTER)
-    result = base + jitter
-    return max(MIN_THINK_SECONDS, round(result, 1))
+    return question_delay_seconds(question_text, minimum=MIN_THINK_SECONDS)
 
 
 # ─── Highlighting via page.evaluate() ─────────────────────────
@@ -87,6 +92,12 @@ async def highlight_question(page):
                            document.querySelector('#questionText') ||
                            document.querySelector('[data-cy="question-text"]');
                 if (el) {
+                    if (!el.hasAttribute('data-wg-highlight')) {
+                        el.setAttribute('data-wg-highlight', JSON.stringify({
+                            border: el.style.border, borderRadius: el.style.borderRadius,
+                            boxShadow: el.style.boxShadow, transition: el.style.transition
+                        }));
+                    }
                     el.style.border = '5px dashed #FFD600';
                     el.style.borderRadius = '8px';
                     el.style.transition = 'border 0.3s ease';
@@ -102,6 +113,12 @@ async def highlight_answer(page, button_handle):
     try:
         await button_handle.evaluate("""
             (el) => {
+                if (!el.hasAttribute('data-wg-highlight')) {
+                    el.setAttribute('data-wg-highlight', JSON.stringify({
+                        border: el.style.border, borderRadius: el.style.borderRadius,
+                        boxShadow: el.style.boxShadow, transition: el.style.transition
+                    }));
+                }
                 el.style.border = '5px solid #00E676';
                 el.style.borderRadius = '8px';
                 el.style.transition = 'border 0.3s ease';
@@ -117,10 +134,12 @@ async def clear_highlights(page):
     try:
         await page.evaluate("""
             () => {
-                document.querySelectorAll('[style*="border"]').forEach(el => {
-                    el.style.border = '';
-                    el.style.borderRadius = '';
-                    el.style.boxShadow = '';
+                document.querySelectorAll('[data-wg-highlight]').forEach(el => {
+                    const original = JSON.parse(el.getAttribute('data-wg-highlight') || '{}');
+                    for (const name of ['border', 'borderRadius', 'boxShadow', 'transition']) {
+                        el.style[name] = original[name] || '';
+                    }
+                    el.removeAttribute('data-wg-highlight');
                 });
             }
         """)
@@ -309,7 +328,8 @@ async def _extract_question_info(page) -> dict:
                     }
                 }
 
-                return { qid: qid, text: text, image: image };
+                const openEnded = !!document.querySelector('textarea[data-testid="open-ended-input"], textarea.text-input');
+                return { qid: qid, text: text, image: image, open_ended: openEnded };
             }
         """)
         return info or {"qid": None, "text": "", "image": ""}
@@ -331,6 +351,7 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
     intermission_logged = False
 
     while elapsed < max_wait:
+        await checkpoint()
         # 1. Check if results screen is visible
         try:
             results_el = await page.query_selector(SEL_RESULTS_CONTAINER)
@@ -561,6 +582,7 @@ async def _wait_for_transition(page, old_text: str = "", old_image: str = "", ol
     elapsed = 0.0
     step = 0.2
     while elapsed < timeout:
+        await checkpoint()
         await asyncio.sleep(step)
         elapsed += step
 
@@ -642,6 +664,9 @@ def _complete_blank_answers(answers, blank_count: int) -> list[str]:
 async def _stop_unanswered_question(page, question_number: int, reason: str) -> bool:
     """Leave the current question available for the user when no answer is resolved."""
     await clear_highlights(page)
+    control = ACTIVE_CONTROL.get()
+    if control:
+        control.emit("attention", number=question_number, message=reason)
     log_error(
         f"Automation stopped at question {question_number}: {reason}. "
         "No answer was submitted. Load answers for this test or check the selected AI, then run again."
@@ -649,7 +674,17 @@ async def _stop_unanswered_question(page, question_number: int, reason: str) -> 
     return False
 
 
-async def automate_test(
+async def automate_test(test_page, answers_db, wrong_count=0, expected_total=None,
+                        use_ai=True, ai_only=False, *, control=None):
+    """Keep CLI behavior while allowing the desktop to control the same solver."""
+    token = ACTIVE_CONTROL.set(control)
+    try:
+        return await _automate_test(test_page, answers_db, wrong_count, expected_total, use_ai, ai_only)
+    finally:
+        ACTIVE_CONTROL.reset(token)
+
+
+async def _automate_test(
     test_page,
     answers_db: dict[str, list[str]],
     wrong_count: int = 0,
@@ -669,6 +704,11 @@ async def automate_test(
     answered = 0
     correct = 0
     wrong = 0
+    control = ACTIVE_CONTROL.get()
+    has_manual_questions = any(
+        getattr(question, "manual_required", False)
+        for question in getattr(answers_db, "questions", {}).values()
+    )
 
     # Determine real question count
     _, page_total = await _read_question_counter(test_page)
@@ -699,7 +739,7 @@ async def automate_test(
         log_info(f"🤖 Starting AI Solver ({_get_active_ai_label()}) — {total_label}.")
     else:
         log_info(f"Starting automation: {total} questions in test ({len(answers_db)} lookup keys loaded).")
-    if wrong_count > 0 and total > 0:
+    if wrong_count > 0 and total > 0 and not has_manual_questions:
         expected_correct = total - wrong_count
         expected_pct = int(100 * expected_correct / total) if total > 0 else 0
         log_info(f"Target score: ~{expected_correct}/{total} ({expected_pct}%)")
@@ -708,6 +748,7 @@ async def automate_test(
     last_question_key = ""
 
     while True:
+        await checkpoint()
         # Wait for the next question or game over screen (passes last_question_key to guarantee novelty!)
         status, q_info = await _wait_for_question_or_end(test_page, last_key=last_question_key, max_wait=60)
         if status == 'ended':
@@ -750,13 +791,29 @@ async def automate_test(
         last_question_key = current_key
         answered += 1
         display_num = page_current if page_current > 0 else answered
+        if control:
+            async def question_still_current(expected=current_key):
+                info = await _extract_question_info(test_page)
+                number, _ = await _read_question_counter(test_page)
+                if not number and not info.get("qid") and q_info.get("option_key"):
+                    option_handles = await _get_option_buttons(test_page)
+                    options = [await _extract_button_info(btn, idx=i)
+                               for i, btn in enumerate(option_handles)]
+                    info["option_key"] = repr(sorted(_option_signature(options).items()))
+                return _question_key(info, number) == expected
+
+            control.begin_question(key=current_key, number=display_num, total=total,
+                                   text=question_text, question_guard=question_still_current)
 
         # ── "Thinking" delay — human-like ──
-        think_time = calc_think_time(question_text)
+        think_time = control.question_delay if control else calc_think_time(question_text)
         display_q = f"Q: \"{question_text[:40]}...\"" if question_text else f"Q [Image/Media {qid or 'ID'}]:"
         log_progress(display_num, total, display_q)
         log_step(f"⏱ Thinking for {think_time}s...")
-        await asyncio.sleep(think_time)
+        if not control:
+            await asyncio.sleep(think_time)
+        else:
+            await checkpoint()
 
         # ── Re-verify live question info right before matching to ensure zero desync ──
         fresh_q_info = await _extract_question_info(test_page)
@@ -766,6 +823,35 @@ async def automate_test(
             question_image = fresh_q_info["image"]
         if fresh_q_info.get("qid"):
             qid = fresh_q_info["qid"]
+
+        # An open-ended response without an authored key needs the user's own
+        # response; treating its text field as a one-word blank would fabricate
+        # a key, even when AI fallback or AI-only mode is enabled.
+        manual_response = requires_manual_response(question_text, answers_db, qid=qid)
+        if control and fresh_q_info.get("open_ended") and not find_answers(question_text, answers_db or {}, qid=qid):
+            manual_response = True
+        if manual_response:
+            await clear_highlights(test_page)
+            if control:
+                control.manual_required()
+                while True:
+                    await checkpoint()
+                    results = await test_page.query_selector(SEL_RESULTS_CONTAINER)
+                    if results and await results.is_visible():
+                        break
+                    if not await question_still_current():
+                        break
+                    await asyncio.sleep(0.25)
+                control.deliberate = False
+                control.submitted()
+                continue
+            log_error(
+                f"Automation stopped at question {display_num}: this open-ended question "
+                "has no fixed answer key. Enter and submit your own response manually "
+                "in the test tab, then run the program again to continue. "
+                "No answer was submitted."
+            )
+            return False
 
         # ── Lazy re-computation of wrong_indices when resuming mid-test or in AI mode ──
         if not _wrong_indices_initialized:
@@ -780,6 +866,9 @@ async def automate_test(
                 log_info(f"🎲 Initialized {actual_wrong} wrong questions: {sorted(list(wrong_indices))} from total {total}")
 
         deliberate_wrong = display_num in wrong_indices
+        answer_verified = False
+        answer_source = "Verified answer key"
+        ai_latency = None
 
         # ── Find correct answer(s) from DB ──
         # The full option set distinguishes questions with identical stems
@@ -797,6 +886,7 @@ async def automate_test(
             )
             if found:
                 correct_answers = found
+                answer_verified = True
 
         # ── Detect MSQ mode ──
         has_radio = await test_page.query_selector(
@@ -834,10 +924,10 @@ async def automate_test(
         # ─────────────────────────────────────────────────
         if visible_fib:
             log_info(f"✏️  Fill-in-the-blank detected ({len(visible_fib)} blank(s))")
-            await highlight_question(test_page)
-
-            for fi in visible_fib:
-                await highlight_answer(test_page, fi)
+            if not control:
+                await highlight_question(test_page)
+                for fi in visible_fib:
+                    await highlight_answer(test_page, fi)
 
             answers_to_fill = []
             ai_fib_wrongs = []
@@ -846,6 +936,10 @@ async def automate_test(
 
             # A partial key also requires a complete new prediction for all blanks.
             if not answers_to_fill and use_ai:
+                if control:
+                    await checkpoint()
+                    control.use_pending_engine()
+                    control.emit("status", message="Requesting an AI answer…")
                 ai_source_note = "AI mode active" if (ai_only or not answers_db) else "No DB match"
                 log_step(f"🤖 {ai_source_note} — querying AI Solver ({_get_active_ai_label()}) for missing term(s)...")
 
@@ -868,18 +962,24 @@ async def automate_test(
                         pass
 
                 loop = asyncio.get_event_loop()
+                ai_started = time.monotonic()
                 try:
-                    ai_fib_answers, ai_fib_wrongs, reasoning = await loop.run_in_executor(
-                        None,
-                        solve_fib_with_ai,
-                        question_text,
-                        len(visible_fib),
-                        image_b64
-                    )
+                    if control:
+                        ai_fib_answers, ai_fib_wrongs, reasoning = await asyncio.to_thread(
+                            solve_fib_with_ai, question_text, len(visible_fib), image_b64,
+                        )
+                    else:
+                        ai_fib_answers, ai_fib_wrongs, reasoning = await loop.run_in_executor(
+                            None, solve_fib_with_ai, question_text, len(visible_fib), image_b64,
+                        )
                 except Exception as exc:
                     log_step(f"AI could not answer this question: {exc}")
                     ai_fib_answers, ai_fib_wrongs, reasoning = [], [], ""
                 answers_to_fill = _complete_blank_answers(ai_fib_answers, len(visible_fib))
+                answer_verified = False
+                ai_latency = time.monotonic() - ai_started
+                provider = re.match(r"^\[([^\]]+)\]", reasoning or "")
+                answer_source = provider.group(1) if provider else _get_active_ai_label()
                 if answers_to_fill:
                     reason_short = f" ({reasoning[:70]}...)" if len(reasoning) > 70 else (f" ({reasoning})" if reasoning else "")
                     log_found(f"💡 AI Solver predicted: {answers_to_fill}{reason_short}")
@@ -891,10 +991,31 @@ async def automate_test(
                     f"no complete answer was found for {len(visible_fib)} blank(s)"
                 )
 
+            if control:
+                if control.highlight and answer_verified:
+                    for fi in visible_fib:
+                        await highlight_answer(test_page, fi)
+                wrong_preview = []
+                if answer_verified:
+                    for answer in answers_to_fill:
+                        candidate = generate_plausible_wrong(answer)
+                        if candidate.strip().casefold() == answer.strip().casefold():
+                            candidate = answer + "s"
+                        wrong_preview.append(candidate)
+                deliberate_wrong = await control.before_submit(
+                    answers_to_fill, source=answer_source, verified=answer_verified,
+                    wrong_answers=wrong_preview, latency=ai_latency,
+                )
+                if deliberate_wrong is None:
+                    last_question_key = ""
+                    continue
+                if deliberate_wrong:
+                    ai_fib_wrongs = wrong_preview
+
             # Handle deliberate wrong with realistic human-like mistakes
             if deliberate_wrong:
                 wrong += 1
-                log_wrong(f"Q{answered}: Deliberately entering realistic WRONG answer for FIB! ({wrong}/{wrong_count})")
+                log_wrong(f"Q{answered}: Deliberately entering realistic WRONG answer for FIB! ({wrong}/{control.wrong_limit if control else wrong_count})")
                 plausible_list = []
                 for idx, ans in enumerate(answers_to_fill):
                     if idx < len(ai_fib_wrongs) and ai_fib_wrongs[idx] and ai_fib_wrongs[idx].strip().lower() != ans.strip().lower():
@@ -912,10 +1033,16 @@ async def automate_test(
                 ans_val = answers_to_fill[i]
                 log_step(f"  Typing into blank [{i+1}/{len(visible_fib)}]: \"{ans_val}\"")
                 try:
+                    if not await checkpoint(action=True):
+                        raise RunStopped("The question changed before filling the answer.")
                     await fi.scroll_into_view_if_needed()
                     await fi.click()
                     await asyncio.sleep(0.1)
+                    if not await checkpoint(action=True):
+                        raise RunStopped("The question changed before filling the answer.")
                     await fi.fill(ans_val)
+                    if not await checkpoint(action=True):
+                        raise RunStopped("The question changed before updating the answer.")
                     await fi.evaluate("""(el, val) => {
                         el.value = val;
                         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -932,6 +1059,8 @@ async def automate_test(
             advanced = await _advance_if_next_button(test_page)
             if not advanced and visible_fib:
                 try:
+                    if not await checkpoint(action=True):
+                        raise RunStopped("The question changed before submission.")
                     await visible_fib[-1].press("Enter")
                     await asyncio.sleep(0.5)
                     advanced = await _advance_if_next_button(test_page)
@@ -945,6 +1074,8 @@ async def automate_test(
                     await _safe_click(submit_btn, "FIB submit")
 
             await asyncio.sleep(CLICK_DELAY_MS / 1000)
+            if control:
+                control.submitted()
             await clear_highlights(test_page)
             await _wait_for_transition(
                 test_page,
@@ -979,6 +1110,10 @@ async def automate_test(
 
         # ── AI Solver: If no DB match (or pure AI mode) and AI is enabled ──
         if not correct_buttons and use_ai and buttons_info:
+            if control:
+                await checkpoint()
+                control.use_pending_engine()
+                control.emit("status", message="Requesting an AI answer…")
             ai_source_note = "AI mode active" if (ai_only or not answers_db) else "No DB match"
             log_step(f"🤖 {ai_source_note} — querying AI Solver ({_get_active_ai_label()})...")
 
@@ -1016,18 +1151,23 @@ async def automate_test(
                     pass
 
             loop = asyncio.get_event_loop()
+            ai_started = time.monotonic()
             try:
-                ai_indices, reasoning = await loop.run_in_executor(
-                    None,
-                    solve_question_with_ai,
-                    question_text,
-                    buttons_info,
-                    is_msq,
-                    image_b64
-                )
+                if control:
+                    ai_indices, reasoning = await asyncio.to_thread(
+                        solve_question_with_ai, question_text, buttons_info, is_msq, image_b64,
+                    )
+                else:
+                    ai_indices, reasoning = await loop.run_in_executor(
+                        None, solve_question_with_ai, question_text, buttons_info, is_msq, image_b64,
+                    )
             except Exception as exc:
                 log_step(f"AI could not answer this question: {exc}")
                 ai_indices, reasoning = [], ""
+            ai_latency = time.monotonic() - ai_started
+            answer_verified = False
+            provider = re.match(r"^\[([^\]]+)\]", reasoning or "")
+            answer_source = provider.group(1) if provider else _get_active_ai_label()
 
             if not isinstance(ai_indices, (list, tuple)) or any(
                 isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < len(buttons)
@@ -1071,6 +1211,26 @@ async def automate_test(
             reason = "no answer options are available" if not buttons else "no complete answer matched the available options"
             return await _stop_unanswered_question(test_page, display_num, reason)
 
+        gui_wrong_targets = None
+        if control:
+            if control.highlight and answer_verified:
+                for btn, _ in correct_buttons:
+                    await highlight_answer(test_page, btn)
+            if is_msq:
+                gui_wrong_targets = ([random.choice(wrong_buttons)] if wrong_buttons else [])
+                if len(correct_buttons) > 1:
+                    gui_wrong_targets.extend(correct_buttons[:-1])
+            else:
+                gui_wrong_targets = [random.choice(wrong_buttons)] if wrong_buttons else []
+            deliberate_wrong = await control.before_submit(
+                [label for _, label in correct_buttons], source=answer_source,
+                verified=answer_verified, wrong_answers=[label for _, label in gui_wrong_targets],
+                latency=ai_latency,
+            )
+            if deliberate_wrong is None:
+                last_question_key = ""
+                continue
+
         # ─────────────────────────────────────────────────
         # MSQ: Multi-Select Question
         # ─────────────────────────────────────────────────
@@ -1079,12 +1239,15 @@ async def automate_test(
 
             if deliberate_wrong:
                 wrong += 1
-                log_wrong(f"Q{answered}: Deliberately picking WRONG for MSQ! ({wrong}/{wrong_count})")
-                targets = []
-                if wrong_buttons:
-                    targets.append(random.choice(wrong_buttons))
-                if len(correct_buttons) > 1:
-                    targets.extend(correct_buttons[:len(correct_buttons) - 1])
+                log_wrong(f"Q{answered}: Deliberately picking WRONG for MSQ! ({wrong}/{control.wrong_limit if control else wrong_count})")
+                if control:
+                    targets = gui_wrong_targets
+                else:
+                    targets = []
+                    if wrong_buttons:
+                        targets.append(random.choice(wrong_buttons))
+                    if len(correct_buttons) > 1:
+                        targets.extend(correct_buttons[:len(correct_buttons) - 1])
             else:
                 correct += 1
                 targets = correct_buttons
@@ -1092,7 +1255,8 @@ async def automate_test(
                 log_found(f"{display_q} -> A: [{ans_str}]")
 
             for i, (btn, btn_text) in enumerate(targets):
-                await highlight_answer(test_page, btn)
+                if not control:
+                    await highlight_answer(test_page, btn)
                 await asyncio.sleep(random.uniform(0.4, 0.8))
                 log_step(f"  Selecting [{i+1}/{len(targets)}]: \"{btn_text}\"")
                 if not await _safe_click(btn, f"MSQ option '{btn_text}'"):
@@ -1118,16 +1282,17 @@ async def automate_test(
         # ─────────────────────────────────────────────────
         else:
             if deliberate_wrong and wrong_buttons:
-                target_btn, target_text = random.choice(wrong_buttons)
+                target_btn, target_text = gui_wrong_targets[0] if control else random.choice(wrong_buttons)
                 wrong += 1
-                log_wrong(f"Q{answered}: Deliberately picking WRONG answer! ({wrong}/{wrong_count})")
+                log_wrong(f"Q{answered}: Deliberately picking WRONG answer! ({wrong}/{control.wrong_limit if control else wrong_count})")
             else:
                 target_btn, target_text = correct_buttons[0]
                 correct += 1
                 log_found(f"{display_q} -> A: \"{correct_answers[0]}\"")
 
-            await highlight_answer(test_page, target_btn)
-            await asyncio.sleep(0.8)
+            if not control:
+                await highlight_answer(test_page, target_btn)
+                await asyncio.sleep(0.8)
 
             log_step(f"Clicking: \"{target_text}\"")
             if not await _safe_click(target_btn, f"answer '{target_text}'"):
@@ -1139,6 +1304,8 @@ async def automate_test(
 
         # Post-click delay
         await asyncio.sleep(CLICK_DELAY_MS / 1000)
+        if control:
+            control.submitted()
 
         # Clear highlights
         await clear_highlights(test_page)
@@ -1154,8 +1321,11 @@ async def automate_test(
     # ── Summary ──
     print()
     log_info(f"✅ Automation complete!")
-    log_info(f"   Total: {answered}  |  ✅ Correct: {correct}  |  ❌ Wrong: {wrong}")
-    if answered > 0:
+    if control:
+        log_info(f"   Processed: {answered}. Accuracy will be read from Wayground results.")
+    else:
+        log_info(f"   Total: {answered}  |  ✅ Correct: {correct}  |  ❌ Wrong: {wrong}")
+    if answered > 0 and not control:
         pct = int(100 * correct / answered)
         log_info(f"   Estimated score: ~{pct}%")
     return True

@@ -3,13 +3,16 @@ Configuration: constants, CSS selectors, timing parameters, and console colors.
 """
 
 import os
+import sys
 
-VERSION = "3.2"
+VERSION = "4.0"
 
 
 def _load_dotenv():
     """Lightweight loader for .env file in project root, avoiding mandatory external dependencies."""
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if getattr(sys, "frozen", False):
+        root_dir = os.path.dirname(sys.executable)
     env_file = os.path.join(root_dir, ".env")
     if os.path.isfile(env_file):
         try:

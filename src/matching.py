@@ -66,6 +66,18 @@ def _option_signature(options: list[dict]) -> Counter:
                    for option in options)
 
 
+def requires_manual_response(question: str, answers_db, qid: str | None = None) -> bool:
+    """Only an identified, verified unkeyed question can require a written response."""
+    records = getattr(answers_db, "questions", {})
+    if qid:
+        record = records.get(f"id:{str(qid).strip()}")
+        if record is not None:
+            return record.manual_required
+    text = _norm(question)
+    matches = [record for record in records.values() if text and _norm(record.text) == text]
+    return len(matches) == 1 and matches[0].manual_required
+
+
 def _find_record_answers(question, records, image_url, options_info):
     q_norm = _norm(question)
     candidates = [record for record in records if q_norm and _norm(record.text) == q_norm]

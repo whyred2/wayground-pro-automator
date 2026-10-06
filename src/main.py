@@ -95,6 +95,9 @@ Modes:
         """
     )
     parser.add_argument(
+        "--cli", action="store_true", help="Run the console interface (no arguments opens the desktop UI)"
+    )
+    parser.add_argument(
         "--test-url",
         default=TEST_URL,
         help=f"URL of the test page (default: {TEST_URL})"
@@ -677,12 +680,18 @@ async def _run_phases(page_test, browser, args):
                     sys.exit(1)
 
     display_questions = get_display_questions(answers_db) if answers_db else []
+    manual_count = sum(record.manual_required for record in getattr(answers_db, "questions", {}).values())
+    if manual_count:
+        log_info(f"{len(display_questions) - manual_count} answer keys for {len(display_questions)} questions; "
+                 f"{manual_count} written response(s) required (no fixed answer key).")
     if display_questions:
         print(f"\n{C_CYAN}{'#':<4} {'Question':<55} {'Answer(s)':<35}{C_RESET}  {C_DIM}[Source: {answer_source}]{C_RESET}")
         print(f"{C_DIM}{'─'*4} {'─'*55} {'─'*35}{C_RESET}")
         for i, (q, answers_list) in enumerate(display_questions):
             q_short = q[:52] + "..." if len(q) > 52 else q
-            if len(answers_list) == 1:
+            if not answers_list:
+                a_short = "Written response required"
+            elif len(answers_list) == 1:
                 a_short = answers_list[0][:32] + "..." if len(answers_list[0]) > 32 else answers_list[0]
             else:
                 a_short = f"[{len(answers_list)}] " + ", ".join(a[:15] for a in answers_list)
@@ -709,7 +718,7 @@ async def _run_phases(page_test, browser, args):
             print(f"  Total questions: {C_DIM}(dynamic / reading live from page){C_RESET}")
         print()
         wrong_input = await asyncio.get_event_loop().run_in_executor(
-            None, input, f"  How many questions to answer WRONG? (0 for 100%) [default: 0]: "
+            None, input, f"  How many questions to answer WRONG? (0 for no deliberate mistakes) [default: 0]: "
         )
         if wrong_input.strip().isdigit():
             wrong_count = int(wrong_input.strip())
@@ -720,7 +729,7 @@ async def _run_phases(page_test, browser, args):
         print(f"{C_CYAN}{'─'*60}{C_RESET}")
         print()
 
-    if wrong_count > 0 and total_questions > 0:
+    if wrong_count > 0 and total_questions > 0 and not manual_count:
         expected_correct = total_questions - wrong_count
         expected_pct = int(100 * expected_correct / total_questions) if total_questions > 0 else 0
         log_info(f"Target score: ~{expected_correct}/{total_questions} ({expected_pct}%)")
@@ -746,6 +755,21 @@ async def _run_phases(page_test, browser, args):
 
 
 if __name__ == "__main__":
+    if "--gui-smoke" in sys.argv:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from desktop_smoke import run_smoke
+        run_smoke(sys.argv[sys.argv.index("--gui-smoke") + 1])
+        sys.exit(0)
+    if len(sys.argv) == 1 or "--gui" in sys.argv:
+        from desktop import run_desktop
+        sys.exit(run_desktop())
+    # A windowed Windows build can still be explicitly launched in CLI mode.
+    if sys.platform == "win32" and sys.stdout is None:
+        import ctypes
+        ctypes.windll.kernel32.AllocConsole()
+        sys.stdin = open("CONIN$", "r", encoding="utf-8")
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+        sys.stderr = sys.stdout
     try:
         asyncio.run(main())
     except SystemExit:

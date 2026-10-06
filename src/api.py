@@ -19,6 +19,7 @@ from urllib.parse import urlparse, parse_qs
 
 from ui import log_step
 from answer_db import AnswerDatabase
+from runtime_control import network_checkpoint
 
 # ─── Shared state for discovery ─────────────────────────────────
 _answers_ready_event = asyncio.Event()
@@ -45,6 +46,7 @@ API_HEADERS = {
 
 
 def _request_json(url: str, payload: dict | None = None, extra_headers: dict | None = None) -> dict:
+    network_checkpoint()
     headers = dict(API_HEADERS)
     headers.update(extra_headers or {})
     raw = None
@@ -54,6 +56,7 @@ def _request_json(url: str, payload: dict | None = None, extra_headers: dict | N
     request = urllib.request.Request(url, data=raw, headers=headers)
     with urllib.request.urlopen(request, timeout=8) as response:
         data = json.loads(response.read().decode("utf-8"))
+    network_checkpoint()
     if not isinstance(data, dict):
         raise ValueError("API returned an invalid JSON object")
     if data.get("success") is False or data.get("error"):
@@ -335,12 +338,22 @@ def _blank_answer_texts(structure: dict) -> list[str]:
     return texts
 
 
-def parse_wayground_answers(payload: dict) -> dict[str, list[str]]:
+def parse_wayground_answers(payload: dict, *, include_unkeyed: bool = False) -> dict[str, list[str]]:
     """Only use explicit server answer keys; options alone are never answers."""
     answers_db = AnswerDatabase()
     for q in _get_questions(payload):
         structure = q.get("structure")
-        if not isinstance(structure, dict) or "answer" not in structure:
+        if not isinstance(structure, dict):
+            continue
+        if include_unkeyed and _is_unkeyed_open_question(q):
+            query = structure.get("query") or {}
+            if not isinstance(query, dict):
+                query = {}
+            answers_db.add_question(_clean_text(query.get("text")), [],
+                                    qid=q.get("_id") or q.get("id"),
+                                    images=_media_urls(query.get("media")), manual_required=True)
+            continue
+        if "answer" not in structure:
             continue
         answer = structure["answer"]
         if answer is None or isinstance(answer, bool):
@@ -403,7 +416,7 @@ def _fetch_quiz_payload(quiz_id: str) -> dict:
 
 def fetch_api_answers(quiz_id: str) -> dict[str, list[str]]:
     """Fetch explicit answer keys from a public quiz with a MongoDB ObjectId."""
-    return parse_wayground_answers(_fetch_quiz_payload(quiz_id))
+    return parse_wayground_answers(_fetch_quiz_payload(quiz_id), include_unkeyed=True)
 
 
 def _game_resource_metadata(room_hash: str) -> dict:
@@ -426,6 +439,17 @@ def _game_resource_metadata(room_hash: str) -> dict:
     return {}
 
 
+def _is_unkeyed_open_question(question: dict) -> bool:
+    """Only explicit open responses can legitimately omit a fixed answer key."""
+    structure = question.get("structure")
+    if not isinstance(structure, dict):
+        return False
+    kinds = [value for value in (question.get("type"), structure.get("kind")) if value]
+    settings = structure.get("settings")
+    return (bool(kinds) and all(str(kind).upper() == "OPEN" for kind in kinds)
+            and isinstance(settings, dict) and settings.get("hasCorrectAnswer") is False)
+
+
 def _verified_quiz_answers(game_questions: list[dict], quiz_payload: dict) -> dict[str, list[str]]:
     """Accept library keys only for the same question IDs and unchanged content."""
     if not game_questions:
@@ -438,6 +462,7 @@ def _verified_quiz_answers(game_questions: list[dict], quiz_payload: dict) -> di
         source_questions[qid] = source_question
     selected = []
     seen_ids = set()
+    unkeyed_open_ids = set()
     for game_question in game_questions:
         qid = str(game_question.get("_id") or game_question.get("id") or "")
         if not qid or qid in seen_ids or qid not in source_questions:
@@ -467,17 +492,43 @@ def _verified_quiz_answers(game_questions: list[dict], quiz_payload: dict) -> di
         if game_structure.get("options") != source_structure.get("options"):
             if not blank or game_structure.get("options") not in (None, []):
                 return {}
+        if (_is_unkeyed_open_question(game_question)
+                and _is_unkeyed_open_question(source_question)):
+            unkeyed_open_ids.add(qid)
         selected.append(source_question)
-    answers = parse_wayground_answers({"questions": selected})
-    return answers if all(f"id:{qid}" in answers for qid in seen_ids) else {}
+    answers = parse_wayground_answers({"questions": [
+        question for question in selected
+        if str(question.get("_id") or question.get("id") or "") not in unkeyed_open_ids
+    ]})
+    if not all(f"id:{qid}" in answers for qid in seen_ids - unkeyed_open_ids):
+        return {}
+    # Preserve every verified game question in order. An open response has no
+    # fixed key, but its empty record lets the caller explain the manual step.
+    verified = AnswerDatabase()
+    for question in selected:
+        qid = str(question.get("_id") or question.get("id") or "")
+        if qid in unkeyed_open_ids:
+            query = question["structure"].get("query") or {}
+            if not isinstance(query, dict):
+                query = {}
+            verified.add_question(_clean_text(query.get("text")), [], qid=qid,
+                                  images=_media_urls(query.get("media")), manual_required=True)
+        else:
+            record = answers.questions[f"id:{qid}"]
+            verified.add_question(record.text, record.answers, qid=record.qid,
+                                  images=record.images, options=record.options)
+    return verified
 
 
-def _search_public_quizzes(title: str) -> list[dict]:
+def _search_public_quizzes(title: str, *, offset: int = 0, page_size: int = 10,
+                          exact_phrase: bool = False) -> list[dict]:
     """Use the same public library search endpoint as the teacher panel."""
     session_id = str(uuid.uuid4())
+    phrase = title.replace('"', " ").strip()
+    query = f'"{phrase}"' if exact_phrase else title
     payload = {
-        "query": title, "queryId": str(uuid.uuid4()), "sessionId": session_id,
-        "page": "explore-ssr", "source": "HeroSearchBar", "from": 0, "size": 10,
+        "query": query, "queryId": str(uuid.uuid4()), "sessionId": session_id,
+        "page": "explore-ssr", "source": "HeroSearchBar", "from": offset, "size": page_size,
         "includeQuestions": False, "includeSources": ["questionTypes"],
         "sortBy": {"key": "_score", "order": "desc"},
         "filters": {"contentTypes": ["quiz"]},
@@ -491,34 +542,80 @@ def _search_public_quizzes(title: str) -> list[dict]:
     return [hit for hit in hits if isinstance(hit, dict)] if isinstance(hits, list) else []
 
 
+def _library_candidate_batches(title: str):
+    """Try the fast general query, then at most three exact-title pages."""
+    yield _search_public_quizzes(title)
+    log_step("Trying exact-title search and additional library pages...")
+    offset = 0
+    seen = set()
+    for _ in range(3):
+        hits = _search_public_quizzes(title, offset=offset, page_size=12, exact_phrase=True)
+        ids = {hit.get("quizId") for hit in hits if is_valid_quiz_id(hit.get("quizId"))}
+        if not hits or not ids.difference(seen):
+            break
+        seen.update(ids)
+        yield hits
+        # The service may cap page size; advance by the actual response length.
+        offset += len(hits)
+
+
 def _fetch_library_answers(title: str, game_questions: list[dict]) -> dict[str, list[str]]:
     if not title or not game_questions:
         return {}
     log_step(f"Searching the public library for the original quiz: {title}")
-    candidates = _search_public_quizzes(title)
-    candidates.sort(key=lambda hit: (
-        _clean_text(hit.get("name")).casefold() != title.casefold(),
-        hit.get("noOfQuestions") != len(game_questions),
-    ))
     tried = set()
-    for candidate in candidates:
-        quiz_id = candidate.get("quizId")
-        if not is_valid_quiz_id(quiz_id) or quiz_id in tried:
-            continue
-        count = candidate.get("noOfQuestions")
-        if isinstance(count, int) and count < len(game_questions):
-            continue
-        if len(tried) >= 5:
-            break
-        tried.add(quiz_id)
-        try:
-            answers = _verified_quiz_answers(game_questions, _fetch_quiz_payload(quiz_id))
-        except Exception:
-            continue
-        if answers:
-            log_step(f"Public quiz verified against all {len(game_questions)} game questions (Quiz ID: {quiz_id})")
-            return answers
+    minimum_keys = sum(not _is_unkeyed_open_question(question) for question in game_questions)
+    for batch in _library_candidate_batches(title):
+        candidates = sorted(batch, key=lambda hit: (
+            _clean_text(hit.get("name")).casefold() != title.casefold(),
+            hit.get("noOfQuestions") != len(game_questions),
+        ))
+        for candidate in candidates:
+            quiz_id = candidate.get("quizId")
+            if not is_valid_quiz_id(quiz_id) or quiz_id in tried:
+                continue
+            count = candidate.get("noOfQuestions")
+            if isinstance(count, int) and count < minimum_keys:
+                continue
+            if len(tried) >= 10:
+                return {}
+            tried.add(quiz_id)
+            try:
+                answers = _verified_quiz_answers(game_questions, _fetch_quiz_payload(quiz_id))
+            except Exception:
+                continue
+            if answers:
+                key_count = sum(key.startswith("id:") for key in answers)
+                log_step(f"Public quiz verified against all {len(game_questions)} game questions: "
+                         f"{key_count} answer keys (Quiz ID: {quiz_id})")
+                return answers
     return {}
+
+
+def fetch_game_snapshot(identifier: str) -> dict:
+    """Read the selected game's manifest for desktop binding and key verification."""
+    clean = str(identifier).strip()
+    pin = clean if is_valid_game_pin(clean) else ""
+    room = {}
+    if pin:
+        response = _request_json("https://wayground.com/play-api/v5/checkRoom", {"roomCode": pin})
+        room = response.get("room") or response.get("data", {}).get("room") or {}
+        if not isinstance(room, dict):
+            raise ValueError("Game API returned an invalid room.")
+        room_hash = str(room.get("hash") or "")
+    else:
+        room_hash = clean
+    if not ROOM_HASH_REGEX.fullmatch(room_hash):
+        raise ValueError("No active game session was found for this PIN.")
+    payload = _request_json("https://wayground.com/play-api/v4/getQuestions", {"roomHash": room_hash})
+    questions = _get_questions(payload) or _get_questions({"room": room})
+    try:
+        metadata = _game_resource_metadata(room_hash)
+    except Exception:
+        metadata = {}
+    return {"pin": pin, "hash": room_hash, "questions": questions,
+            "quiz_id": room.get("quizId") or metadata.get("quiz_id", ""),
+            "name": metadata.get("name") or room.get("quizName") or room.get("name") or ""}
 
 
 def fetch_game_answers(identifier: str) -> dict[str, list[str]]:
@@ -530,8 +627,8 @@ def fetch_game_answers(identifier: str) -> dict[str, list[str]]:
         room = response.get("room") or response.get("data", {}).get("room") or {}
         if not isinstance(room, dict):
             raise ValueError("Game API returned an invalid room")
-        answers = parse_wayground_answers({"room": room})
-        if answers:
+        answers = parse_wayground_answers({"room": room}, include_unkeyed=True)
+        if any(answers.values()):
             return answers
         room_hash = str(room.get("hash") or "").strip()
         quiz_id = room.get("quizId")
@@ -540,8 +637,8 @@ def fetch_game_answers(identifier: str) -> dict[str, list[str]]:
     if not ROOM_HASH_REGEX.fullmatch(room_hash):
         raise ValueError("Game API did not return a valid room hash")
     payload = _request_json("https://wayground.com/play-api/v4/getQuestions", {"roomHash": room_hash})
-    answers = parse_wayground_answers(payload)
-    if answers:
+    answers = parse_wayground_answers(payload, include_unkeyed=True)
+    if any(answers.values()):
         return answers
     questions = _get_questions(payload)
     # Some games expose a public quiz ID. Opaque 64-character IDs cannot be
@@ -802,8 +899,8 @@ async def intercept_response(response):
             return
         # Do not skip JSON after discovering a PIN: subsequent getQuestions
         # and quizserver responses are where the actual keys can arrive.
-        answers = parse_wayground_answers(body)
-        if answers:
+        answers = parse_wayground_answers(body, include_unkeyed=True)
+        if any(answers.values()):
             _set_answers(answers, "Wayground API (Browser response)")
         data = body.get("data") if isinstance(body.get("data"), dict) else {}
         room = body.get("room") or data.get("room") or {}

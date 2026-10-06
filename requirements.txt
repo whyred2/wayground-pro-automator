@@ -1,3 +1,4 @@
 playwright>=1.40.0
 playwright-stealth>=1.0.6
 openai>=1.0.0
+PySide6>=6.7,<7

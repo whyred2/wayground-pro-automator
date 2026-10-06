@@ -15,6 +15,7 @@ from openai import OpenAI
 
 import config
 from ui import log_info, log_step, log_error
+from runtime_control import network_checkpoint
 
 
 def _completion_options(model: str, max_tokens: int) -> dict:
@@ -32,6 +33,8 @@ def get_ai_client(api_key: str | None = None, base_url: str | None = None) -> Op
     return OpenAI(
         api_key=key,
         base_url=url,
+        timeout=30.0,
+        max_retries=0,
     )
 
 
@@ -96,6 +99,7 @@ def _solve_via_gateway_mcq(
     image_base64: str | None = None,
 ) -> tuple[list[int], str]:
     """Call Cloudflare Worker AI Gateway endpoint /api/solve for multiple-choice questions."""
+    network_checkpoint()
     endpoint = f"{gateway_url.rstrip('/')}/api/solve"
     payload = {
         "question": question_text,
@@ -113,6 +117,7 @@ def _solve_via_gateway_mcq(
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
+        network_checkpoint()
         if config.AI_GATEWAY_MODEL and res_data.get("model") != config.AI_GATEWAY_MODEL:
             raise ValueError("Gateway returned a different model than selected")
         provider = res_data.get("provider", "Cloudflare Workers AI")
@@ -133,6 +138,7 @@ def _solve_via_gateway_fib(
     image_base64: str | None = None,
 ) -> tuple[list[str], list[str], str]:
     """Call Cloudflare Worker AI Gateway endpoint /api/solve-fib for fill-in-the-blank questions."""
+    network_checkpoint()
     endpoint = f"{gateway_url.rstrip('/')}/api/solve-fib"
     payload = {
         "question": question_text,
@@ -149,6 +155,7 @@ def _solve_via_gateway_fib(
     )
     with urllib.request.urlopen(req, timeout=30.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
+        network_checkpoint()
         if config.AI_GATEWAY_MODEL and res_data.get("model") != config.AI_GATEWAY_MODEL:
             raise ValueError("Gateway returned a different model than selected")
         provider = res_data.get("provider", "Cloudflare Workers AI")
@@ -384,6 +391,7 @@ def solve_question_with_ai(
     last_exc = None
 
     for attempt in range(max_retries + 1):
+        network_checkpoint()
         try:
             resp = client.chat.completions.create(
                 model=mdl,
@@ -395,6 +403,7 @@ def solve_question_with_ai(
                 **_completion_options(mdl, 768),
                 temperature=0.0,
             )
+            network_checkpoint()
             choices = resp.choices or []
             if not choices:
                 return [], "No choices returned by AI API"
@@ -619,6 +628,7 @@ def solve_fib_with_ai(
     last_exc = None
 
     for attempt in range(max_retries + 1):
+        network_checkpoint()
         try:
             resp = client.chat.completions.create(
                 model=mdl,
@@ -630,6 +640,7 @@ def solve_fib_with_ai(
                 **_completion_options(mdl, 512),
                 temperature=0.0,
             )
+            network_checkpoint()
             choices = resp.choices or []
             if not choices:
                 return [], [], "No choices returned by AI API"

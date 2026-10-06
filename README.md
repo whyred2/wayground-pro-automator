@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v3.2</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v4.0</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Smart Hybrid AI Solver & Direct API Interception
     <br />
@@ -29,6 +29,9 @@
 
 ### Table of Contents
 
+- [What's New in v4.0](#whats-new-in-v40)
+- [Desktop Screenshots](#desktop-screenshots)
+- [What's New in v3.2.1](#whats-new-in-v321)
 - [What's New in v3.2](#whats-new-in-v32)
 - [What's New in v3.0.1](#whats-new-in-v301)
 - [What's New in v3.0](#whats-new-in-v30)
@@ -42,6 +45,41 @@
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
 - [Running Tests](#running-tests)
+
+### What's New in v4.0
+
+- **Native Windows desktop UI** — Double-click the executable or launch without arguments to open the startup window. Connect the dedicated Edge/Chrome browser, select the game tab, and review answer sources and question counts. The interface is in English; the console remains available with `--cli`.
+- **Start AI-only on an existing game** — **AI only** can start directly after a real engine availability check, without verified keys, a full API question list, or a known question count. The visible counter supplies progress during the run. The **Game PIN or game link** field also works when a test is already underway.
+- **Live panel and compact strip** — Pause/resume, submit one answer with **Answer now**, schedule or undo a deliberate mistake, and adjust timing during execution. The compact strip keeps the current question, pause and Settings controls; it shows an accuracy percentage only when Wayground supplies one. Answer source and AI request time come from the actual operation.
+- **Consistent window design** — Rounded outlines, draggable headers, light/dark themes and spaced button icons are shared across the panel and Settings. Windows fit their content and available screen space. **Current answer** preserves the complete text, wraps it, and scrolls longer responses; the engine and request time remain readable.
+- **Settings during a run** — Check and switch AI engines for the next AI request, highlight verified correct options, keep the panel on top, and choose a Boss key. F2 hides/restores the overlay while automation continues; the tray icon can restore it too. Settings work from both the full panel and compact strip.
+- **Variable minimum delay** — **Min delay** defaults to 10 seconds for new settings. Automatic waiting accounts for question length and ±30% variation, with the selected minimum as its lower bound. Changing the minimum updates the current countdown; **0** skips automatic waiting. Existing saved values are preserved.
+- **Mistake limit can return to zero** — Change the limit to **0** at any point, including after a deliberate mistake. This cancels a pending deliberate mistake and prevents further ones while retaining the submitted-mistake history. The panel displays the used count and configured limit separately.
+- **Execution stays bound to the selected game** — Normal navigation within the same identified game is allowed. Closing the target tab, reloading its active game page, or switching to another game stops submission and requires fresh preparation. Stop and Exit keep the browser open.
+- **Written responses stay manual** — An OPEN question without a fixed key waits for your own response in the test tab, then the desktop run continues after you submit it. The status text is never inserted as an answer. Verified keys, AI predictions and unresolved questions remain distinct.
+- **Existing configuration and CLI are retained** — Existing command-line options still work, and personal `.env` configuration can be placed beside the executable. Saved UI preferences contain no passwords, API keys, game identifiers or answer data.
+
+### Desktop Screenshots
+
+These screenshots show the actual desktop windows with demonstration data, not a live account or game session.
+
+| Startup: choose a game and check its answers | Live panel: answer, source and run controls |
+| --- | --- |
+| <img src="docs/screenshots/startup.png" alt="Startup window with game selection, answer method and minimum delay" width="500"> | <img src="docs/screenshots/live-panel.png" alt="Live panel with question progress, current answer and controls" width="500"> |
+
+**Compact strip** — Current question, pause, Settings and Expand remain accessible.
+
+<img src="docs/screenshots/compact-strip.png" alt="Compact strip with progress and quick controls" width="620">
+
+| Settings: dark appearance | Settings: light appearance |
+| --- | --- |
+| <img src="docs/screenshots/settings-dark.png" alt="Dark Settings window with AI, automation and appearance controls" width="380"> | <img src="docs/screenshots/settings-light.png" alt="Light Settings window with the same controls" width="380"> |
+
+### What's New in v3.2.1
+
+- **Search beyond the first results** — When the fast library lookup fails, exact-title search checks additional pages. A matching test beyond the first ten results can now be found automatically; question IDs and content are still verified before keys are accepted.
+- **Written responses no longer discard valid keys** — An OPEN question explicitly marked as having no fixed correct answer is retained separately. For example, Technical Writing Quiz now loads 45 verified keys and displays all 46 questions, including one written response.
+- **Clear manual-response handling** — The table labels unkeyed written questions, keeps answer-key counts separate from question counts, and stops before filling or submitting them. Enter and submit your own response in the test tab, then run the program again to continue. These questions are not sent to the fill-in-the-blank AI solver.
 
 ### What's New in v3.2
 
@@ -102,16 +140,21 @@
 - **Hybrid Answer Engine** — Retrieves explicit Wayground API keys, checks public quiz candidates against the game, and supports captured network responses, optional Quizit Standard, and CheatNetwork fallback. AI can solve missing questions when enabled.
 - **Separate Question Records** — Repeated wording and image variants keep their own answers. IDs and visible option sets distinguish variants without merging their keys.
 - **Unresolved Questions Stop Automation** — If no complete answer is available, the current question is left unsubmitted with an explanation.
-- **Dual-mode operation** — Attach to Edge/Chrome (recommended in the interactive menu, preserves logins) or launch a new standalone browser.
-- **Human-like behavior** — Dynamic "thinking" delays based on character count (`min 10s + 0.05s/char`), randomized click logic, and jitter ±30%.
-- **Intentional errors** — Use `--wrong N` or answer interactively after seeing the question count to avoid a suspicious 100% score.
-- **Clean UI** — A fully revamped terminal UI with minimal spam, dynamic animated spinners, and clear testing phases.
+- **Desktop and console operation** — The default Windows UI connects to a dedicated Edge/Chrome profile. The console menu retains attach and standalone-browser modes.
+- **Variable answer timing** — The desktop **Min delay** defaults to 10 seconds, adds question-length timing and ±30% variation, and never falls below the selected minimum. Set it to **0** to skip automatic waiting; **Answer now** submits immediately.
+- **Intentional errors** — Set the limit in Settings or use `--wrong N` in the console. Desktop mistakes use verified keys and available alternatives; lowering the limit to zero preserves past mistakes and cancels pending ones.
+- **Native desktop controls** — Startup, live panel, compact strip and themed Settings share rounded outlines, readable answer text, pause/resume, Boss key and on-top controls. Accuracy percentages come from Wayground results.
 
 ### Project Structure
 
 ```
 src/
-├── main.py          # Entry point, CLI, interactive menu
+├── main.py          # Desktop/CLI entry point
+├── desktop.py       # Native startup, panel, strip, settings and Boss key
+├── desktop_backend.py # Background browser worker and verified preparation
+├── desktop_engines.py # Immutable AI presets and real availability probes
+├── runtime_control.py # Cooperative pause, single-answer step and stop
+├── session_binding.py # Selected game/document identity checks
 ├── config.py        # Constants, selectors, timing, colors, AI settings
 ├── ai_setup.py      # AI selection and availability checks
 ├── ai_solver.py     # AI real-time solver (OpenAI SDK / Groq / Qwen, text & vision)
@@ -135,7 +178,7 @@ cloudflare-worker/   # AI gateway implementation and deployment configuration
 #### Option 1: Using the Standalone `.exe` (Recommended)
 
 1. Download the latest **[WaygroundAutomator.exe](https://github.com/whyred2/wayground-pro-automator/releases/latest)** from the **[GitHub Releases Page](https://github.com/whyred2/wayground-pro-automator/releases)**.
-2. Double-click to run — no Python, Node.js, or API keys required! It works out-of-the-box using the built-in Cloudflare AI Gateway.
+2. Double-click to open the desktop UI. Microsoft Edge or Google Chrome is required; Python and Node.js are bundled. The built-in Cloudflare AI Gateway requires no personal API key.
 
 #### Option 2: Running from Python Source
 
@@ -155,7 +198,7 @@ cp .env.example .env
 
 ### Quick Start
 
-The simplest way is to run the interactive menu — it will guide you through everything:
+Open the desktop UI:
 
 ```powershell
 python src/main.py
@@ -165,14 +208,14 @@ _(Or just run the `.exe` file)_
 
 **What happens:**
 
-1. Select Mode `1` (Attach to Edge/Chrome — recommended), or `2` for a standalone browser.
-2. The browser opens or connects; select the Wayground test tab when prompted.
-3. Log into your account and navigate to the test waiting room.
-4. Go back to the console and press **Enter**.
-5. Select Smart Hybrid, Qwen through Groq, GPT-OSS 120B / 20B, a configured personal API, or no AI. Each engine shows **Available / Unavailable** after a test request. Qwen and GPT-OSS can use the bundled gateway without a personal key; a configured Groq key enables direct Groq requests for these presets.
-6. The program retrieves target API keys first, then offers fallbacks if needed. Existing CheatNetwork answer tabs can be selected without reloading them. Quizit Standard requires its own account; `--no-bot` disables it.
-7. Review the complete question list and choose how many questions to answer wrong (or press Enter for no deliberate mistakes).
-8. Automation begins!
+1. Click **Connect browser**, then sign in and join your test in the Automator browser.
+2. Click **Refresh tabs** and explicitly select the game tab, including a test already in progress. If needed, fill **Game PIN or game link** with that game's PIN or supported link.
+3. Choose **Verified answer keys only** (default), **Keys + AI fallback**, or **AI only**. AI availability is checked with a real test request; written responses without fixed keys remain manual.
+4. For key-based modes, click **Check test and answers** and review the source, key/question counts and written responses. **Answer sources** accepts a teacher quiz URL or a separate CheatNetwork tab; Quizit is optional and may require its own sign-in. In **AI only**, you can click **Start automation** directly; the program checks the engine before starting.
+5. Set **Min delay** on the startup screen and the deliberate-mistake limit in **Settings**, then click **Start automation**. The delay is a lower bound for variable automatic waiting, not a fixed interval; **0** skips waiting.
+6. Use the live panel or **Minimize** strip. **Answer now** while paused submits one answer and preserves pause. F2 hides/restores the overlay while execution continues. **Stop automation** in Settings keeps the browser open.
+
+For the previous console menu, run `python src/main.py --cli`. The windowed executable also accepts `--cli` and opens a console for that mode.
 
 ### CLI Parameters
 
@@ -180,6 +223,8 @@ You can skip the interactive menu by providing arguments directly:
 
 | Parameter                 | Description                                              | Default                                    |
 | ------------------------- | -------------------------------------------------------- | ------------------------------------------ |
+| `--cli`                   | Open the console menu instead of the desktop UI          | Desktop UI without arguments               |
+| `--gui`                   | Explicitly open the desktop UI                          | Same as no arguments                       |
 | `--ai`                    | Use AI solver exclusively (no database lookups)          | `False`                                    |
 | `--ai-provider ENGINE`    | Choose `gateway`, `direct`, `groq-120b`, `groq-20b`, or `off`; enabled engines are checked before starting | Interactive selection |
 | `--no-ai`                 | Disable AI solver and auto-fallback completely           | `False`                                    |
@@ -197,8 +242,11 @@ You can skip the interactive menu by providing arguments directly:
 **Examples:**
 
 ```powershell
-# Interactive menu (recommended)
+# Desktop UI (recommended)
 python src/main.py
+
+# Console menu
+python src/main.py --cli
 
 # Auto-start with AI solver directly
 python src/main.py --ai
@@ -219,11 +267,13 @@ If direct lookup fails, existing CheatNetwork answer tabs are offered as a fallb
 
 The script reads the screen and matches the prompt.
 
-1. Computes a human-like read time (`min 10s + 0.05s/char`).
-2. Highlights the screen elements being processed.
-3. Solves Single-Select and Multi-Select (MSQ) questions.
-4. Injects deliberate failures if `--wrong` was requested.
-5. Tracks the live question number so consecutive identical prompts are treated as separate questions. Missing or ambiguous answers stop automation without submission; a waiting timeout does not report successful completion.
+1. Resolves a complete key for the current question or asks the selected AI engine when the mode permits it. **AI only** skips answer-key lookup.
+2. Calculates variable reading time from the chosen minimum and question length (`0.05 seconds/character`), with ±30% variation. The desktop lower bound defaults to 10 seconds; **0** skips automatic waiting. The console keeps its reading-time behavior.
+3. Matches and submits single-select, multi-select and supported blank answers. Optional highlighting is limited to verified correct options.
+4. In the desktop UI, applies a deliberate mistake when configured and a verified alternative is available. A live limit of zero prevents new mistakes without erasing submitted history; **Answer now** bypasses the remaining countdown. The console retains `--wrong N`.
+5. Tracks the game's current question and validates the selected session before submission. Normal navigation within that game is allowed; an active-page reload, closed tab or changed game requires preparation again. Consecutive identical prompts keep separate records.
+
+Missing, ambiguous or incomplete answers leave the question unsubmitted with an explanation. A waiting timeout does not count as completion. The desktop waits for manual submission on unkeyed written questions and resumes afterward. AI predictions do not count as confirmed correctness; accuracy is read from the actual Wayground results.
 
 ### Running Tests
 
@@ -241,12 +291,19 @@ node --test tests/test_gateway.mjs
 
 Commit `tests/` with the source changes. These regression checks are not included in the standalone `.exe`.
 
+Native UI interaction checks run offline with the other Python tests. For full automation checks against local fixture pages in a fresh headless Edge browser, run `python tests/browser_desktop_check.py`. This does not connect to or answer a live game.
+
+To build the windowed executable on Windows, install PyInstaller in the same Python environment as the requirements, then run `python scripts/build_windows.py`. The file is written to `dist/<version>/WaygroundAutomator.exe`. This build isolates DLL lookup from unrelated tools on PATH; `--console` produces a diagnostic build under `scratch/gui-debug`.
+
 ---
 
 ## 🇷🇺 Русский
 
 ### Содержание
 
+- [Что нового в v4.0](#что-нового-в-v40)
+- [Скриншоты интерфейса](#скриншоты-интерфейса)
+- [Что нового в v3.2.1](#что-нового-в-v321)
 - [Что нового в v3.2](#что-нового-в-v32)
 - [Что нового в v3.0.1](#что-нового-в-v301)
 - [Что нового в v3.0](#что-нового-в-v30)
@@ -261,6 +318,41 @@ Commit `tests/` with the source changes. These regression checks are not include
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
 - [Запуск проверок](#запуск-проверок)
+
+### Что нового в v4.0
+
+- **Оконный интерфейс Windows** — Двойной клик по `.exe` или запуск без аргументов открывает стартовое окно. Подключите отдельный Edge/Chrome, выберите игровую вкладку и проверьте источник ответов и количество вопросов. Интерфейс программы на английском; консоль доступна через `--cli`.
+- **«Только ИИ» в уже открытой игре** — Режим **AI only** запускается после реальной проверки доступности движка без найденных ключей, полного списка вопросов API и заранее известного количества вопросов. Прогресс берётся со страницы теста. Поле **Game PIN or game link** доступно и для уже начатой игры.
+- **Пульт и компактная полоска** — Пауза, продолжение, отправка одного ответа кнопкой **Answer now**, назначение или отмена намеренной ошибки и изменение задержки работают во время выполнения. Полоска сохраняет номер вопроса, паузу и Settings; процент точности появляется только из результатов Wayground. Источник ответа и время запроса ИИ соответствуют реальной операции.
+- **Единое оформление окон** — Скруглённая обводка, перетаскиваемые заголовки, светлая/тёмная тема и отступы между иконками и текстом кнопок. Размер пульта и Settings подстраивается под содержимое и экран. **Current answer** сохраняет полный текст, переносит строки и прокручивает длинные ответы; движок и время запроса остаются читаемыми.
+- **Настройки во время выполнения** — Проверка и смена ИИ для следующего запроса, подсветка подтверждённых вариантов, закрепление поверх окон и выбор Boss key. F2 скрывает и возвращает пульт, пока автоматизация продолжается; вернуть окно можно и из трея. Settings работают в полном и свёрнутом режиме.
+- **Переменная минимальная задержка** — Для новых настроек **Min delay** равна 10 секундам. Автоматическое ожидание учитывает длину вопроса и разброс ±30%, но не опускается ниже выбранного минимума. Изменение поля обновляет текущий отсчёт; **0** отключает автоматическое ожидание. Ранее сохранённые значения сохраняются.
+- **Лимит ошибок можно вернуть к нулю** — Значение **0** принимается в любой момент, в том числе после намеренной ошибки. Оно отменяет запланированную ошибку и предотвращает следующие, сохраняя историю уже отправленных ошибок. Пульт показывает использованное количество и выбранный лимит отдельно.
+- **Привязка к выбранной игре** — Обычные переходы внутри той же определённой игры разрешены. Закрытие вкладки, перезагрузка активной страницы теста или смена игры останавливают отправку и требуют новой проверки. Stop и выход оставляют браузер открытым.
+- **Письменные ответы вводятся вручную** — Вопрос OPEN без фиксированного ключа ожидает собственного ответа во вкладке теста; после ручной отправки оконный режим продолжает работу. Текст статуса не подставляется в поле ответа. Подтверждённые ключи, предположения ИИ и неразрешённые вопросы различаются.
+- **Сохранены CLI и личная конфигурация** — Прежние аргументы запуска работают; личный `.env` можно положить рядом с `.exe`. Настройки интерфейса не содержат паролей, API-ключей, идентификаторов игр и данных ответов.
+
+### Скриншоты интерфейса
+
+На скриншотах показаны настоящие окна программы с демонстрационными данными, а не действующий аккаунт или сессия теста. Интерфейс на английском.
+
+| Старт: выбор игры и проверка ответов | Пульт: ответ, источник и управление |
+| --- | --- |
+| <img src="docs/screenshots/startup.png" alt="Стартовое окно с выбором игры, метода ответов и минимальной задержки" width="500"> | <img src="docs/screenshots/live-panel.png" alt="Пульт с прогрессом, текущим ответом и кнопками управления" width="500"> |
+
+**Компактная полоска** — Номер вопроса, пауза, Settings и Expand остаются доступными.
+
+<img src="docs/screenshots/compact-strip.png" alt="Компактная полоска с прогрессом и быстрым управлением" width="620">
+
+| Settings: тёмная тема | Settings: светлая тема |
+| --- | --- |
+| <img src="docs/screenshots/settings-dark.png" alt="Тёмное окно Settings с ИИ, автоматизацией и оформлением" width="380"> | <img src="docs/screenshots/settings-light.png" alt="Светлое окно Settings с теми же настройками" width="380"> |
+
+### Что нового в v3.2.1
+
+- **Поиск за пределами первых результатов** — Если быстрый поиск не дал ключей, программа ищет точное название на дополнительных страницах. Теперь тест за пределами первых десяти результатов может быть найден автоматически; ID и содержимое вопросов по-прежнему проверяются.
+- **Письменный вопрос не отменяет найденные ключи** — Вопрос OPEN с явным признаком отсутствия фиксированного правильного ответа сохраняется отдельно. Например, Technical Writing Quiz теперь загружает 45 проверенных ключей и показывает все 46 вопросов, включая один письменный.
+- **Понятная остановка для письменного ответа** — Таблица помечает такие вопросы, количество ключей отличается от общего числа вопросов, а программа останавливается до заполнения и отправки. Ответьте самостоятельно во вкладке теста и запустите программу снова для продолжения. Эти вопросы не передаются ИИ-решателю текстовых пропусков.
 
 ### Что нового в v3.2
 
@@ -318,16 +410,21 @@ Commit `tests/` with the source changes. These regression checks are not include
 - **Гибридный движок** — Получает явные ключи из API Wayground, проверяет публичные тесты по вопросам игры и поддерживает ответы из сетевых запросов, дополнительный источник Quizit Standard и CheatNetwork. При включённом ИИ он может решить недостающий вопрос.
 - **Отдельные записи вопросов** — Повторяющиеся формулировки и вопросы с картинками сохраняют собственные ответы. Варианты различаются по ID и набору ответов на экране без объединения ключей.
 - **Остановка при отсутствии ключа** — Если полный ответ не найден, вопрос остаётся неотправленным, а программа сообщает причину.
-- **Два режима работы** — Подключение к Edge/Chrome (рекомендуется в интерактивном меню, сохраняет логины) или новый отдельный браузер.
-- **Имитация человека** — Динамические задержки на чтение (`минимум 10 сек + 0.05 сек/символ`), хаотичные движения и jitter ±30%.
-- **Намеренные ошибки** — Используйте `--wrong N` или ответьте интерактивно после загрузки вопросов, чтобы не вызывать подозрений идеальным 100%.
-- **Чистый интерфейс консоли** — Анимированные загрузки, статусы фаз и аккуратный лог.
+- **Оконный и консольный режимы** — Оконный интерфейс по умолчанию подключается к отдельному профилю Edge/Chrome. В консоли сохранён выбор подключения или отдельного браузера.
+- **Переменное время ответа** — **Min delay** по умолчанию равна 10 секундам; автоматическое ожидание учитывает длину вопроса и разброс ±30% и не опускается ниже выбранного минимума. **0** отключает ожидание; **Answer now** отправляет ответ сразу.
+- **Намеренные ошибки** — Лимит настраивается в Settings; в консоли доступен `--wrong N`. Оконный режим использует подтверждённые ключи и доступные неправильные варианты. Нулевой лимит сохраняет историю и отменяет запланированные ошибки.
+- **Оконное управление** — Стартовое окно, пульт, компактная полоска и Settings со скруглённой обводкой, читаемыми ответами, паузой, Boss key и закреплением поверх окон. Процент точности берётся из результатов Wayground.
 
 ### Структура проекта
 
 ```
 src/
-├── main.py          # Точка входа, CLI, интерактивное меню
+├── main.py          # Точка входа оконного и консольного режимов
+├── desktop.py       # Стартовое окно, пульт, полоска, Settings и Boss key
+├── desktop_backend.py # Фоновый браузер и подготовка проверенных ключей
+├── desktop_engines.py # Предустановки ИИ и реальные проверки доступности
+├── runtime_control.py # Пауза, отправка одного ответа и остановка
+├── session_binding.py # Проверка выбранной игры и документа страницы
 ├── config.py        # Константы, селекторы, тайминги, цвета
 ├── ai_setup.py      # Выбор ИИ и проверка доступности
 ├── ai_solver.py     # ИИ-решатель для текста и изображений
@@ -351,7 +448,7 @@ cloudflare-worker/   # Код ИИ-шлюза и настройки публик
 #### Способ 1: Использование готового `.exe` (Рекомендуется)
 
 1. Скачайте свежую версию **[WaygroundAutomator.exe](https://github.com/whyred2/wayground-pro-automator/releases/latest)** со страницы **[Релизов GitHub](https://github.com/whyred2/wayground-pro-automator/releases)**.
-2. Запустите файл двойным кликом — установка Python, браузеров и ввод API-ключей **не требуются**! Программа сразу готова к работе через встроенный Cloudflare AI Gateway.
+2. Запустите файл двойным кликом — откроется оконный интерфейс. Нужен установленный Microsoft Edge или Google Chrome; Python и Node.js включены в сборку. Для встроенного ИИ-шлюза личный API-ключ не требуется.
 
 #### Способ 2: Запуск из исходников Python
 
@@ -371,7 +468,7 @@ cp .env.example .env
 
 ### Быстрый старт
 
-Самый простой способ — запустить интерактивное меню:
+Откройте оконный интерфейс:
 
 ```powershell
 python src/main.py
@@ -381,14 +478,14 @@ _(Или просто откройте файл `.exe`)_
 
 **Что произойдёт:**
 
-1. Выберите режим `1` (Подключение к Edge/Chrome — рекомендуется) или `2` для отдельного браузера.
-2. Браузер откроется или подключится; выберите вкладку теста Wayground, когда программа предложит.
-3. Авторизуйтесь под своим аккаунтом и перейдите на страницу ожидания теста.
-4. Вернитесь в консоль и нажмите **Enter**.
-5. Выберите Smart Hybrid, Qwen через Groq, GPT-OSS 120B / 20B, настроенный личный API или отключение ИИ. Программа выполнит пробный запрос и покажет **Available / Unavailable** с причиной. Qwen и GPT-OSS могут использовать встроенный шлюз без личного ключа; настроенный ключ Groq позволяет этим предустановкам обращаться к Groq напрямую.
-6. Сначала программа получит ключи текущего теста через API. При неудаче предложит дополнительные источники, включая выбор открытой вкладки CheatNetwork без перезагрузки. Для Quizit Standard нужен отдельный аккаунт; `--no-bot` отключает этот источник.
-7. Просмотрите полный список вопросов и укажите количество намеренных ошибок (или нажмите Enter, чтобы их не делать).
-8. Автоматизация начнётся!
+1. Нажмите **Connect browser**, войдите в аккаунт и откройте игру в браузере Automator.
+2. Нажмите **Refresh tabs** и выберите игровую вкладку, в том числе уже начатый тест. При необходимости укажите его PIN или поддерживаемую ссылку в **Game PIN or game link**.
+3. Выберите **Verified answer keys only** (по умолчанию), **Keys + AI fallback** или **AI only**. Доступность ИИ проверяется реальным пробным запросом; письменные ответы без ключа вводятся вручную.
+4. В режимах с ключами нажмите **Check test and answers** и проверьте источник, количество ключей/вопросов и письменные вопросы. В **Answer sources** доступны ссылка на тест учителя и отдельная вкладка CheatNetwork; Quizit необязателен и может запросить собственную авторизацию. В **AI only** можно сразу нажать **Start automation** — программа сначала проверит ИИ.
+5. Установите **Min delay** на стартовом экране и лимит ошибок в **Settings**, затем **Start automation**. Это нижняя граница переменного ожидания, а не фиксированный интервал; **0** отключает ожидание.
+6. Управляйте пультом или полоской **Minimize**. **Answer now** во время паузы отправляет один ответ и сохраняет паузу. F2 скрывает/возвращает пульт, пока автоматизация продолжается. **Stop automation** в Settings оставляет браузер открытым.
+
+Консольное меню доступно через `python src/main.py --cli`. Оконная сборка `.exe` также принимает `--cli` и открывает консоль для этого режима. Прежние аргументы запуска сохранены.
 
 ### Параметры запуска
 
@@ -396,6 +493,8 @@ _(Или просто откройте файл `.exe`)_
 
 | Параметр                 | Описание                                                | По умолчанию                               |
 | ------------------------ | ------------------------------------------------------- | ------------------------------------------ |
+| `--cli`                  | Открыть консольное меню вместо оконного интерфейса      | Без аргументов открывается UI               |
+| `--gui`                  | Явно открыть оконный интерфейс                         | Как при запуске без аргументов              |
 | `--ai`                   | Решать тест напрямую через AI Solver (без поиска базы)  | `False`                                    |
 | `--ai-provider ENGINE`   | Выбрать `gateway`, `direct`, `groq-120b`, `groq-20b` или `off`; доступность ИИ проверяется перед стартом | Интерактивный выбор |
 | `--no-ai`                | Полностью отключить ИИ-солвер и авто-переключение на ИИ | `False`                                    |
@@ -430,18 +529,21 @@ python src/main.py --attach --wrong 6
 
 #### Решение (Phase 2)
 
-1. Вычисляет время на чтение человеком (`минимум 10 сек + 0.05 сек на символ`).
-2. Сопоставляет вопрос по ID или набору вариантов, выбирает правильные кнопки либо заполняет текстовые пропуски.
-3. В случае `--wrong` специально кликает на неправильный ответ N раз за весь тест.
-4. Учитывает номер вопроса, чтобы последовательные одинаковые формулировки не пропускались. Если ответ отсутствует или неоднозначен, останавливается до отправки. Таймаут ожидания не считается успешным завершением.
+1. Получает полный ключ текущего вопроса или обращается к выбранному ИИ, если режим это разрешает. **AI only** пропускает поиск ключей.
+2. Вычисляет переменное время чтения по выбранному минимуму и длине вопроса (`0.05 секунды на символ`) с разбросом ±30%. В оконном режиме минимум по умолчанию равен 10 секундам; **0** отключает автоматическое ожидание. В консоли сохранён расчёт времени чтения.
+3. Сопоставляет и отправляет одиночные, множественные и поддерживаемые текстовые ответы. Необязательная подсветка применяется только к подтверждённым правильным вариантам.
+4. В оконном режиме выполняет намеренную ошибку, если она настроена и доступен подтверждённый неправильный вариант. Нулевой лимит предотвращает новые ошибки и сохраняет историю уже отправленных; **Answer now** пропускает оставшееся ожидание.
+5. Учитывает текущий номер вопроса и проверяет выбранную сессию перед отправкой. Обычные переходы внутри той же игры разрешены; перезагрузка активной страницы, закрытие вкладки и другая игра требуют новой подготовки. Последовательные одинаковые формулировки сохраняют отдельные записи.
+
+Отсутствие полного или однозначного ответа оставляет вопрос неотправленным с объяснением причины. Таймаут не считается завершением теста. Оконный режим ожидает ручной отправки письменного вопроса без ключа и продолжает после неё. Предположение ИИ не считается подтверждённой правильностью; точность считывается из настоящих результатов Wayground.
 
 ### Устранение проблем
 
 <details>
 <summary><b>❌ Could not connect on port 9222</b></summary>
 
-**Причина:** Ваш Edge работает в фоне и мешает подключиться к порту отладки.
-**Решение:** Нажмите `Ctrl+Shift+Esc` (Диспетчер задач) и завершите все процессы `msedge.exe`. Затем запустите программу снова.
+**Причина:** Отладочный порт недоступен или предыдущий браузер профиля Automator ещё работает.
+**Решение:** Закройте окно браузера, созданное Automator, и повторите **Connect browser**. Для профиля используется `%LocalAppData%\WaygroundAutomator\BrowserProfile`.
 
 </details>
 
@@ -468,6 +570,10 @@ node --test tests/test_gateway.mjs
 ```
 
 Папку `tests/` следует коммитить вместе с изменениями исходников. В готовый `.exe` эти проверки не включаются.
+
+Проверки оконного интерфейса выполняются без подключения к настоящей игре. Команда `python tests/browser_desktop_check.py` дополнительно проверяет автоматизацию на локальных тестовых страницах в отдельном Edge без видимого окна.
+
+Для сборки в Windows установите PyInstaller в окружение с зависимостями проекта и выполните `python scripts/build_windows.py`. Результат сохраняется в `dist/<version>/WaygroundAutomator.exe`; `--console` создаёт диагностическую сборку в `scratch/gui-debug`.
 
 <p align="center">
   <sub>Built with <a href="https://playwright.dev/python/">Playwright</a> · Python 3.10+</sub>

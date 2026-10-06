@@ -59,7 +59,7 @@ def is_port_open(port: int) -> bool:
         return False
 
 
-def launch_browser_with_debug(port: int) -> subprocess.Popen:
+def launch_browser_with_debug(port: int, *, interactive: bool = True) -> subprocess.Popen:
     """
     Find Edge/Chrome, launch with --remote-debugging-port.
     Uses dedicated automator profile so debug port opens instantly even
@@ -97,6 +97,11 @@ def launch_browser_with_debug(port: int) -> subprocess.Popen:
         if i % 3 == 2:
             log_step(f"Waiting for {browser_name} port {port}... ({int((i+1)*0.8)}s)")
 
+    if not interactive:
+        raise RuntimeError(
+            f"{browser_name} did not open the automation port. "
+            "Close the Automator browser window and connect again. Your other browser windows are left open."
+        )
     print()
     log_error(f"{browser_name} is running, but port {port} is not responding.")
     log_info("This usually happens because the browser is ALREADY open in normal mode.")

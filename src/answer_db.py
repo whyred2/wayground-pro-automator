@@ -11,6 +11,7 @@ class AnswerQuestion:
     answers: list[str]
     images: list[str] = field(default_factory=list)
     options: list[dict] = field(default_factory=list)
+    manual_required: bool = False
 
 
 class AnswerDatabase(dict[str, list[str]]):
@@ -23,9 +24,9 @@ class AnswerDatabase(dict[str, list[str]]):
     def __bool__(self):
         return bool(self.questions) or len(self) > 0
 
-    def add_question(self, text, answers, *, qid="", images=None, options=None):
+    def add_question(self, text, answers, *, qid="", images=None, options=None, manual_required=False):
         record = AnswerQuestion(str(qid or ""), text, list(answers),
-                                list(images or []), list(options or []))
+                                list(images or []), list(options or []), manual_required)
         key = f"id:{record.qid}" if record.qid else f"row:{len(self.questions)}"
         self.questions[key] = record
         self._rebuild_aliases()
@@ -44,6 +45,8 @@ class AnswerDatabase(dict[str, list[str]]):
                 self[key] = list(answers)
 
         for question in self.questions.values():
+            if not question.answers:
+                continue
             if question.text:
                 alias(question.text, question.answers)
             for image in question.images:
@@ -62,7 +65,8 @@ class AnswerDatabase(dict[str, list[str]]):
         if isinstance(other, AnswerDatabase):
             for question in other.questions.values():
                 self.add_question(question.text, question.answers, qid=question.qid,
-                                  images=question.images, options=question.options)
+                                  images=question.images, options=question.options,
+                                  manual_required=question.manual_required)
         else:
             super().update(other)
         if kwargs:
