@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QFontDatabase, QMouseEvent
+from PySide6.QtGui import QFontDatabase, QMouseEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QStyle, QStyleOptionButton, QTableWidget
 from desktop import DesktopWindow, Preferences, BossKey, drag_offset
@@ -491,18 +491,25 @@ class WindowTests(unittest.TestCase):
         self.running()
         self.window.on_event({"type": "answer", "answers": ["Answer"], "can_wrong": True, "deliberate": False})
         QTest.qWait(30)
-        def has_text_color(widget, rgb):
+        def assert_text_color(widget, rgb):
             _, text_rect = widget.content_rects()
             image = widget.grab().toImage()
             expected = tuple(int(rgb[index:index + 2], 16) for index in (1, 3, 5))
-            return any(max(abs(channel - wanted) for channel, wanted in zip(
-                (image.pixelColor(x, y).red(), image.pixelColor(x, y).green(), image.pixelColor(x, y).blue()), expected)) <= 8
-                for x in range(max(0, text_rect.left()), min(image.width(), text_rect.right() + 1))
-                for y in range(max(0, text_rect.top()), min(image.height(), text_rect.bottom() + 1)))
-        self.assertTrue(has_text_color(self.window.now_button, "#ffffff"))
-        self.assertTrue(has_text_color(self.window.wrong_button, "#ffabb4"))
+            group = QPalette.ColorGroup.Active if widget.isEnabled() else QPalette.ColorGroup.Disabled
+            option = widget._option()
+            self.assertEqual(option.palette.color(group, QPalette.ColorRole.ButtonText).name(), rgb)
+            nearest = 255
+            for x in range(max(0, text_rect.left()), min(image.width(), text_rect.right() + 1)):
+                for y in range(max(0, text_rect.top()), min(image.height(), text_rect.bottom() + 1)):
+                    pixel = image.pixel(x, y)
+                    channels = ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255)
+                    nearest = min(nearest, max(abs(channel - wanted) for channel, wanted in zip(channels, expected)))
+            # Small glyphs on Linux can be entirely antialiased, without a solid-color pixel.
+            self.assertLessEqual(nearest, 32, f"Rendered {rgb} text differs by {nearest}")
+        assert_text_color(self.window.now_button, "#ffffff")
+        assert_text_color(self.window.wrong_button, "#ffabb4")
         self.window.wrong_button.setEnabled(False)
-        self.assertTrue(has_text_color(self.window.wrong_button, "#8e9eb5"))
+        assert_text_color(self.window.wrong_button, "#8e9eb5")
 
     def test_icon_buttons_preserve_keyboard_and_mouse_commands(self):
         self.running()
@@ -598,10 +605,13 @@ class WindowTests(unittest.TestCase):
     def test_long_answer_grows_window_to_keep_controls_visible_when_screen_allows(self):
         self.running()
         self.window.on_event({"type": "resolved", "source": "Wayground Quiz API", "verified": True, "latency": None})
+        self.window.on_event({"type": "answer", "answers": ["Short answer"], "can_wrong": False, "deliberate": False})
+        QTest.qWait(50)
+        short_height = self.window.height()
         self.window.on_event({"type": "answer", "answers": ["A long verified response with punctuation, parentheses and repeated phrases that must wrap correctly. " * 20], "can_wrong": False, "deliberate": False})
         QTest.qWait(50)
         if self.window.screen().availableGeometry().height() >= 750:
-            self.assertGreater(self.window.height(), 440)
+            self.assertGreater(self.window.height(), short_height)
             self.assertEqual(self.window.runtime_scroll.verticalScrollBar().maximum(), 0)
             control_bottom = self.window.now_button.mapTo(self.window.runtime_scroll.viewport(), self.window.now_button.rect().bottomLeft()).y()
             self.assertLessEqual(control_bottom, self.window.runtime_scroll.viewport().height())

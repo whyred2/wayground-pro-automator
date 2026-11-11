@@ -69,9 +69,9 @@ class LocationTests(unittest.TestCase):
 
     def test_env_directory_is_outside_macos_app_bundle(self):
         app = self.home / "WaygroundAutomator.app/Contents/MacOS/WaygroundAutomator"
-        self.assertEqual(app_paths.executable_directory(app), self.home)
+        self.assertEqual(app_paths.executable_directory(app), self.home.resolve())
         executable = self.home / "binary/WaygroundAutomator"
-        self.assertEqual(app_paths.executable_directory(executable), self.home / "binary")
+        self.assertEqual(app_paths.executable_directory(executable), (self.home / "binary").resolve())
 
     def test_frozen_env_loader_reads_from_the_application_directory(self):
         (self.home / ".env").write_text("WAYGROUND_PLATFORM_TEST=loaded\n", encoding="utf-8")
