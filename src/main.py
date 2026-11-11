@@ -749,7 +749,7 @@ async def _run_phases(page_test, browser, args):
 
 if __name__ == "__main__":
     if "--gui-smoke" in sys.argv:
-        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from desktop_smoke import run_smoke
         run_smoke(sys.argv[sys.argv.index("--gui-smoke") + 1])
         sys.exit(0)

@@ -41,7 +41,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libopengl0
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0 xvfb xauth
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
       - name: Run tests
@@ -56,7 +56,7 @@ jobs:
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             dist/native/WaygroundAutomator.app/Contents/MacOS/WaygroundAutomator --gui-smoke scratch/compiled-smoke
           else
-            dist/native/WaygroundAutomator --gui-smoke scratch/compiled-smoke
+            QT_QPA_PLATFORM=xcb xvfb-run -a -s '-screen 0 1280x1024x24' dist/native/WaygroundAutomator --gui-smoke scratch/compiled-smoke
           fi
           python -c 'import json; from pathlib import Path; report=json.loads(Path("scratch/compiled-smoke/report.json").read_text()); assert report["passed"] >= 45; print(report["passed"], "compiled checks passed")'
       - name: Package native download
