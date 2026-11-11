@@ -1,0 +1,78 @@
+name: Native desktop builds
+
+on:
+  push:
+    branches: ["codex/build-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x86_64
+            os: windows-2022
+          - label: linux-x86_64
+            os: ubuntu-24.04
+          - label: macos-x86_64
+            os: macos-15-intel
+          - label: macos-arm64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      WAYGROUND_TEST_BROWSER_CHANNEL: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+      - name: Install Linux Qt dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests
+      - name: Build native application
+        run: python scripts/build_desktop.py --distpath dist/native
+      - name: Check compiled application
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            dist/native/WaygroundAutomator.exe --gui-smoke scratch/compiled-smoke
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            dist/native/WaygroundAutomator.app/Contents/MacOS/WaygroundAutomator --gui-smoke scratch/compiled-smoke
+          else
+            dist/native/WaygroundAutomator --gui-smoke scratch/compiled-smoke
+          fi
+          python -c 'import json; from pathlib import Path; report=json.loads(Path("scratch/compiled-smoke/report.json").read_text()); assert report["passed"] >= 45; print(report["passed"], "compiled checks passed")'
+      - name: Package native download
+        shell: bash
+        run: |
+          mkdir -p dist/downloads
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/native/WaygroundAutomator.app dist/downloads/WaygroundAutomator-v4.1-${{ matrix.label }}.zip
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            tar -C dist/native -czf dist/downloads/WaygroundAutomator-v4.1-${{ matrix.label }}.tar.gz WaygroundAutomator
+          else
+            cp dist/native/WaygroundAutomator.exe dist/downloads/WaygroundAutomator-v4.1-${{ matrix.label }}.exe
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: WaygroundAutomator-v4.1-${{ matrix.label }}
+          path: dist/downloads/*
+          if-no-files-found: error
+          retention-days: 14

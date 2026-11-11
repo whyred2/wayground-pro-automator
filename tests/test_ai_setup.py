@@ -261,7 +261,8 @@ class ConnectionTests(unittest.TestCase):
     def test_direct_check_is_bounded_and_honors_disabled_gateway(self):
         client = MagicMock()
         client.with_options.return_value = client
-        client.chat.completions.create.return_value.choices = [object()]
+        client.chat.completions.create.return_value.choices = [
+            SimpleNamespace(message=SimpleNamespace(content='{"selected_indices":[1]}'), finish_reason="stop")]
         with patch("ai_solver.OpenAI", return_value=client), \
                 patch("ai_solver.urllib.request.urlopen") as gateway:
             ok, _ = ai_solver.test_ai_connection(api_key="key", model="model", gateway_url="")

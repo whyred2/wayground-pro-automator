@@ -61,6 +61,12 @@ def run_smoke(output):
         if not condition:
             raise AssertionError(name)
         checks.append(name)
+    # Client construction creates TLS contexts even before the first request.
+    # Exercise it in the actual executable so missing SSL resources fail here.
+    from ai_solver import get_ai_client
+    with get_ai_client(api_key="offline-smoke-key", base_url="https://example.invalid/v1") as client:
+        with client.with_options(timeout=10.0, max_retries=0) as checked:
+            check("personal API client initializes with TLS verification", str(checked.base_url) == "https://example.invalid/v1/")
     window.show()
     app.processEvents()
     QTest.qWait(30)
@@ -156,7 +162,7 @@ def run_smoke(output):
     QTest.keyClick(window.drawer, Qt.Key.Key_Escape)
     check("closing settings leaves the running test paused", not window.drawer.isVisible() and window.running and window.paused)
     window.toggle_hidden()
-    check("boss key hides without pause", not window.isVisible() and window.paused)
+    check("boss key hides or minimizes without pause", (not window.isVisible() or window.isMinimized()) and window.paused)
     window.toggle_hidden()
     check("boss key restores same strip", window.isVisible() and window.compact)
     window.on_event({"type": "manual", "message": "Enter and submit your own written response in the test tab."})

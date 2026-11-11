@@ -42,9 +42,28 @@ def engine_catalog():
     }
 
 
-def redact(message):
+def personal_engine(base, key, model):
+    """Validate a session-only OpenAI-compatible API without changing active settings."""
+    base, key, model = base.strip().rstrip("/"), key.strip(), model.strip()
+    try:
+        url = urlsplit(base)
+        valid = (url.scheme in ("http", "https") and url.hostname and url.port != 0
+                 and not url.username and not url.password and not url.query and not url.fragment
+                 and not any(char.isspace() for char in base))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Enter an API base URL starting with http:// or https://, without credentials or query parameters.")
+    if not key:
+        raise ValueError("Enter your API key.")
+    if not model:
+        raise ValueError("Enter the model name supported by your API.")
+    return Engine("direct", f"Personal API · {model}", key, model, base, "")
+
+
+def redact(message, *secrets):
     text = str(message)
-    for secret in (config.AI_API_KEY, config.GROQ_API_KEY, config.MISTRAL_API_KEY):
+    for secret in (config.AI_API_KEY, config.GROQ_API_KEY, config.MISTRAL_API_KEY, *secrets):
         if secret:
             text = text.replace(secret, "[redacted]")
     return text
@@ -57,9 +76,9 @@ async def probe(engine):
         result = await asyncio.to_thread(
             test_ai_connection, engine.key, engine.model, engine.base, engine.gateway,
         )
-        return bool(result[0]), redact(result[1])
+        return bool(result[0]), redact(result[1], engine.key)
     except Exception as exc:
-        return False, redact(exc)
+        return False, redact(exc, engine.key)
 
 
 def apply_engine(engine, *, default_model=None):

@@ -10,6 +10,7 @@ import math
 import re
 import time
 import random
+import threading
 import urllib.request
 from openai import OpenAI
 
@@ -18,12 +19,80 @@ from ui import log_info, log_step, log_error
 from runtime_control import network_checkpoint
 
 
+_COMPLETION_CAPABILITIES = {}
+_CAPABILITIES_LOCK = threading.Lock()
+
+
+def _reasoning_model(model: str) -> bool:
+    name = model.rsplit("/", 1)[-1].lower()
+    return bool(re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:-|$))", name))
+
+
 def _completion_options(model: str, max_tokens: int) -> dict:
-    """Reserve tokens for GPT-OSS reasoning as well as the final JSON answer."""
+    """Select the token parameter and leave room for reasoning before the JSON answer."""
+    if _reasoning_model(model):
+        return {"max_completion_tokens": max(4096, max_tokens)}
     if model in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
         return {"max_tokens": max(2048, max_tokens),
                 "extra_body": {"reasoning_effort": "low", "include_reasoning": False}}
     return {"max_tokens": max_tokens}
+
+
+def _unsupported_parameter(exc):
+    """Adapt only explicit parameter rejections, never auth, quota or network failures."""
+    if getattr(exc, "status_code", None) != 400:
+        return None
+    error = getattr(exc, "body", None)
+    if isinstance(error, dict) and isinstance(error.get("error"), dict):
+        error = error["error"]
+    error = error if isinstance(error, dict) else {}
+    message = str(error.get("message") or exc).lower()
+    param = error.get("param")
+    if not param:
+        match = re.search(r"(?:unsupported (?:parameter|value)|(?:unknown|unrecognized) (?:parameter|argument))"
+                          r"\s*:\s*['\"]?(max_tokens|max_completion_tokens|temperature)\b", message)
+        param = match.group(1) if match else None
+    unsupported = (error.get("code") == "unsupported_parameter"
+                   or (param == "temperature" and error.get("code") == "unsupported_value")
+                   or "not supported" in message or "unsupported parameter" in message
+                   or (param == "temperature" and "unsupported value" in message)
+                   or "unknown parameter" in message or "unrecognized" in message)
+    if unsupported and param in ("max_tokens", "max_completion_tokens", "temperature"):
+        return param
+    return None
+
+
+def _create_completion(client, model: str, max_tokens: int, **arguments):
+    """Share checked API capabilities between the probe and both solver paths."""
+    options = _completion_options(model, max_tokens)
+    token_param = "max_completion_tokens" if "max_completion_tokens" in options else "max_tokens"
+    budget = options.pop(token_param)
+    cache_key = (str(client.base_url), model)
+    with _CAPABILITIES_LOCK:
+        token_param, omit_temperature = _COMPLETION_CAPABILITIES.get(
+            cache_key, (token_param, _reasoning_model(model)))
+    switched_tokens = False
+    while True:
+        token_budget = max(4096, budget) if token_param == "max_completion_tokens" else budget
+        request = {**arguments, **options, token_param: token_budget}
+        if omit_temperature:
+            request.pop("temperature", None)
+        network_checkpoint()
+        try:
+            response = client.chat.completions.create(model=model, **request)
+        except Exception as exc:
+            parameter = _unsupported_parameter(exc)
+            if parameter == token_param and not switched_tokens:
+                token_param = "max_completion_tokens" if token_param == "max_tokens" else "max_tokens"
+                switched_tokens = True
+            elif parameter == "temperature" and "temperature" in request:
+                omit_temperature = True
+            else:
+                raise
+        else:
+            with _CAPABILITIES_LOCK:
+                _COMPLETION_CAPABILITIES[cache_key] = (token_param, omit_temperature)
+            return response
 
 
 def get_ai_client(api_key: str | None = None, base_url: str | None = None) -> OpenAI:
@@ -79,14 +148,26 @@ def test_ai_connection(
 
     try:
         client = get_ai_client(api_key=key, base_url=url).with_options(timeout=10.0, max_retries=0)
-        resp = client.chat.completions.create(
-            model=mdl,
-            messages=[{"role": "user", "content": "ping"}],
-            **_completion_options(mdl, 5),
+        resp = _create_completion(
+            client, mdl, 256,
+            messages=[{"role": "user", "content": 'What is 1 + 1? Options: 1) 2; 2) 3. '
+                       'Return JSON only: {"selected_indices": [the 1-based option number]}.'}],
+            response_format={"type": "json_object"},
+            temperature=0.0,
         )
-        if resp and resp.choices:
-            return True, "Connection successful"
-        return False, "No choices returned"
+        if not resp or not resp.choices:
+            return False, "No choices returned"
+        choice = resp.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            return False, "Test answer was cut off by the completion token limit."
+        try:
+            answer = json.loads(choice.message.content or "")
+        except (ValueError, TypeError):
+            return False, "API did not return a valid JSON test answer."
+        if (not isinstance(answer, dict) or answer.get("selected_indices") != [1]
+                or type(answer["selected_indices"][0]) is not int):
+            return False, "API did not return the correct test answer."
+        return True, "Test answer received (JSON response verified)"
     except Exception as exc:
         return False, str(exc)
 
@@ -393,14 +474,13 @@ def solve_question_with_ai(
     for attempt in range(max_retries + 1):
         network_checkpoint()
         try:
-            resp = client.chat.completions.create(
-                model=mdl,
+            resp = _create_completion(
+                client, mdl, 768,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
-                **_completion_options(mdl, 768),
                 temperature=0.0,
             )
             network_checkpoint()
@@ -630,14 +710,13 @@ def solve_fib_with_ai(
     for attempt in range(max_retries + 1):
         network_checkpoint()
         try:
-            resp = client.chat.completions.create(
-                model=mdl,
+            resp = _create_completion(
+                client, mdl, 512,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
-                **_completion_options(mdl, 512),
                 temperature=0.0,
             )
             network_checkpoint()

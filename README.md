@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <h1 align="center">🚀 Wayground Pro Automator v4.0</h1>
+  <h1 align="center">🚀 Wayground Pro Automator v4.1</h1>
   <p align="center">
     Automated test-taking on <b>wayground.com</b> with Smart Hybrid AI Solver & Direct API Interception
     <br />
@@ -29,6 +29,7 @@
 
 ### Table of Contents
 
+- [What's New in v4.1](#whats-new-in-v41)
 - [What's New in v4.0](#whats-new-in-v40)
 - [Desktop Screenshots](#desktop-screenshots)
 - [What's New in v3.2.1](#whats-new-in-v321)
@@ -45,6 +46,17 @@
 - [CLI Parameters](#cli-parameters)
 - [How It Works](#how-it-works)
 - [Running Tests](#running-tests)
+
+### What's New in v4.1
+
+- **Experimental Linux and macOS support** — Added native browser discovery, user-data locations, platform-aware desktop controls and a shared native build script. Windows behavior is retained. Native Linux/macOS validation is pending; see [platform setup and limitations](docs/platform-support.md).
+- **Personal API settings in the UI** — Enter an OpenAI-compatible API base URL, API key and model in **Settings → AI engine → Personal API**. The key is masked by default, can be revealed, and is redacted from logs. Settings apply only after a successful check, including for the next AI request during a run. UI-entered API settings last until the app closes; use `.env` to retain them across restarts.
+- **GPT-6 request compatibility** — Uses `max_completion_tokens` with room for reasoning and omits custom temperature. Explicit API rejections trigger bounded retries to find supported token-limit and temperature parameters. Successful capabilities are reused for the same URL and model by both the connection check and solver.
+- **Verified API connection checks** — A provider must return the correct JSON answer to a test question. Empty, malformed, wrong or truncated responses fail the check and leave the previous API settings active.
+- **Automatic answer-explanation handling** — Uses **Next question** inside Wayground's explanation panel, including clickable `div` controls and English, Russian and Ukrainian labels. Waits for the panel to close before reading the next question and respects pause and Stop.
+- **Standalone HTTPS fix** — The Windows build script includes the SSL runtime's required PEM resource, fixing `[Errno 2] No such file or directory` during API-client initialization. The executable smoke check now verifies API-client initialization too.
+
+Full release notes: [v4.1](docs/releases/v4.1.md). The v4.1 executable has not been built yet.
 
 ### What's New in v4.0
 
@@ -140,7 +152,7 @@ These screenshots show the actual desktop windows with demonstration data, not a
 - **Hybrid Answer Engine** — Retrieves explicit Wayground API keys, checks public quiz candidates against the game, and supports captured network responses, optional Quizit Standard, and CheatNetwork fallback. AI can solve missing questions when enabled.
 - **Separate Question Records** — Repeated wording and image variants keep their own answers. IDs and visible option sets distinguish variants without merging their keys.
 - **Unresolved Questions Stop Automation** — If no complete answer is available, the current question is left unsubmitted with an explanation.
-- **Desktop and console operation** — The default Windows UI connects to a dedicated Edge/Chrome profile. The console menu retains attach and standalone-browser modes.
+- **Desktop and console operation** — The desktop UI connects to a dedicated Edge/Chrome/Chromium profile. Windows is verified; Linux and macOS have experimental source support. The console menu retains attach and standalone-browser modes.
 - **Variable answer timing** — The desktop **Min delay** defaults to 10 seconds, adds question-length timing and ±30% variation, and never falls below the selected minimum. Set it to **0** to skip automatic waiting; **Answer now** submits immediately.
 - **Intentional errors** — Set the limit in Settings or use `--wrong N` in the console. Desktop mistakes use verified keys and available alternatives; lowering the limit to zero preserves past mistakes and cancels pending ones.
 - **Native desktop controls** — Startup, live panel, compact strip and themed Settings share rounded outlines, readable answer text, pause/resume, Boss key and on-top controls. Accuracy percentages come from Wayground results.
@@ -184,6 +196,8 @@ cloudflare-worker/   # AI gateway implementation and deployment configuration
 
 **Prerequisites:** Python 3.10+, pip
 
+Linux/macOS setup, native browser requirements and current platform limitations are documented in [Desktop platform support](docs/platform-support.md).
+
 ```powershell
 # 1. Install dependencies
 pip install -r requirements.txt
@@ -213,7 +227,11 @@ _(Or just run the `.exe` file)_
 3. Choose **Verified answer keys only** (default), **Keys + AI fallback**, or **AI only**. AI availability is checked with a real test request; written responses without fixed keys remain manual.
 4. For key-based modes, click **Check test and answers** and review the source, key/question counts and written responses. **Answer sources** accepts a teacher quiz URL or a separate CheatNetwork tab; Quizit is optional and may require its own sign-in. In **AI only**, you can click **Start automation** directly; the program checks the engine before starting.
 5. Set **Min delay** on the startup screen and the deliberate-mistake limit in **Settings**, then click **Start automation**. The delay is a lower bound for variable automatic waiting, not a fixed interval; **0** skips waiting.
-6. Use the live panel or **Minimize** strip. **Answer now** while paused submits one answer and preserves pause. F2 hides/restores the overlay while execution continues. **Stop automation** in Settings keeps the browser open.
+6. Use the live panel or **Minimize** strip. **Answer now** while paused submits one answer and preserves pause. On Windows, F2 hides/restores the overlay while execution continues; Linux/macOS shortcut behavior is described in the [platform guide](docs/platform-support.md). **Stop automation** in Settings keeps the browser open.
+
+To use your own OpenAI-compatible API, open **Settings → AI engine → Personal API**, enter **API base URL**, **API key**, and **Model**, then click **Check / apply engine**. The key is masked by default. Successful settings apply to the next AI request during a run; failed checks keep the previous settings. UI-entered API settings last until the app closes and are never saved in UI preferences. For configuration across restarts, use `.env`.
+
+The connection check verifies a real JSON test answer using the same request parameters as the solver. GPT-6 uses `max_completion_tokens` with room for reasoning and omits custom temperature. Explicit API rejections of token-limit parameters or temperature trigger bounded compatibility retries; successful capabilities are reused for that API URL and model until the app closes.
 
 For the previous console menu, run `python src/main.py --cli`. The windowed executable also accepts `--cli` and opens a console for that mode.
 
@@ -295,12 +313,15 @@ Native UI interaction checks run offline with the other Python tests. For full a
 
 To build the windowed executable on Windows, install PyInstaller in the same Python environment as the requirements, then run `python scripts/build_windows.py`. The file is written to `dist/<version>/WaygroundAutomator.exe`. This build isolates DLL lookup from unrelated tools on PATH; `--console` produces a diagnostic build under `scratch/gui-debug`.
 
+For native Linux/macOS build preparation, use `python scripts/build_desktop.py --dry-run` on that OS. See [platform support](docs/platform-support.md) for build dependencies, `.app` output, shortcut limitations and the manual CI checks. Each OS requires its own native build; no v4.1 binaries have been produced.
+
 ---
 
 ## 🇷🇺 Русский
 
 ### Содержание
 
+- [Что нового в v4.1](#что-нового-в-v41)
 - [Что нового в v4.0](#что-нового-в-v40)
 - [Скриншоты интерфейса](#скриншоты-интерфейса)
 - [Что нового в v3.2.1](#что-нового-в-v321)
@@ -318,6 +339,17 @@ To build the windowed executable on Windows, install PyInstaller in the same Pyt
 - [Как это работает](#как-это-работает)
 - [Устранение проблем](#устранение-проблем)
 - [Запуск проверок](#запуск-проверок)
+
+### Что нового в v4.1
+
+- **Экспериментальная поддержка Linux и macOS** — Добавлены поиск браузера, системные каталоги данных, адаптация оконного управления и общий сценарий нативной сборки. Поведение Windows сохранено. Проверка на настоящих Linux/macOS ещё требуется; см. [настройку платформ и ограничения](docs/platform-support.md).
+- **Свой API через интерфейс** — В **Settings → AI engine → Personal API** можно указать URL OpenAI-совместимого API, ключ и модель. Ключ скрыт по умолчанию, доступен для просмотра и удаляется из логов. Параметры применяются после успешной проверки, в том числе к следующему AI-запросу во время работы. Ввод через UI действует до закрытия программы; для сохранения между запусками используйте `.env`.
+- **Совместимость запросов с GPT-6** — Используется `max_completion_tokens` с запасом на рассуждения, без пользовательской температуры. При явном отказе API выполняется ограниченный подбор поддерживаемых параметров лимита токенов и температуры. Результат запоминается для этого URL и модели и используется проверкой подключения и решателем.
+- **Проверка реального ответа API** — Провайдер должен вернуть правильный JSON-ответ на тестовый вопрос. Пустой, некорректный, неверный или обрезанный ответ не проходит проверку; прежние параметры API сохраняются.
+- **Автоматический переход после объяснения** — Программа нажимает **Следующий вопрос** внутри панели объяснения Wayground, включая кликабельные `div` и подписи на английском, русском и украинском. Следующий вопрос считывается после закрытия панели; пауза и Stop продолжают работать.
+- **Исправление HTTPS в самостоятельной сборке** — Скрипт сборки Windows включает обязательный PEM-файл SSL runtime, устраняя `[Errno 2] No such file or directory` при создании API-клиента. Встроенная проверка `.exe` теперь проверяет и создание API-клиента.
+
+Полное описание релиза: [v4.1](docs/releases/v4.1.md). Исполняемый файл версии 4.1 пока не собран.
 
 ### Что нового в v4.0
 
@@ -468,6 +500,8 @@ cp .env.example .env
 
 ### Быстрый старт
 
+Для Linux и macOS доступны [инструкция запуска из исходников и ограничения](docs/platform-support.md). В этих системах Boss key работает, пока приложение в фокусе; восстановление доступно через трей или панель задач/Dock.
+
 Откройте оконный интерфейс:
 
 ```powershell
@@ -483,7 +517,11 @@ _(Или просто откройте файл `.exe`)_
 3. Выберите **Verified answer keys only** (по умолчанию), **Keys + AI fallback** или **AI only**. Доступность ИИ проверяется реальным пробным запросом; письменные ответы без ключа вводятся вручную.
 4. В режимах с ключами нажмите **Check test and answers** и проверьте источник, количество ключей/вопросов и письменные вопросы. В **Answer sources** доступны ссылка на тест учителя и отдельная вкладка CheatNetwork; Quizit необязателен и может запросить собственную авторизацию. В **AI only** можно сразу нажать **Start automation** — программа сначала проверит ИИ.
 5. Установите **Min delay** на стартовом экране и лимит ошибок в **Settings**, затем **Start automation**. Это нижняя граница переменного ожидания, а не фиксированный интервал; **0** отключает ожидание.
-6. Управляйте пультом или полоской **Minimize**. **Answer now** во время паузы отправляет один ответ и сохраняет паузу. F2 скрывает/возвращает пульт, пока автоматизация продолжается. **Stop automation** в Settings оставляет браузер открытым.
+6. Управляйте пультом или полоской **Minimize**. **Answer now** во время паузы отправляет один ответ и сохраняет паузу. В Windows F2 скрывает/возвращает пульт, пока автоматизация продолжается; поведение в Linux/macOS описано в [документации платформ](docs/platform-support.md). **Stop automation** в Settings оставляет браузер открытым.
+
+Для своего OpenAI-совместимого API откройте **Settings → AI engine → Personal API**, заполните **API base URL**, **API key** и **Model**, затем нажмите **Check / apply engine**. Ключ по умолчанию скрыт. Во время работы успешно проверенные параметры применяются к следующему AI-запросу; неудачная проверка сохраняет прежние параметры. Введённые через UI параметры действуют до закрытия приложения и не записываются в настройки интерфейса. Для сохранения между запусками используйте `.env`.
+
+Проверка подключения требует корректный JSON-ответ на тестовый вопрос и использует те же параметры, что и решатель. Для GPT-6 передаётся `max_completion_tokens` с запасом на рассуждения, без пользовательской температуры. При явном отказе API принять параметр лимита токенов или температуры выполняется ограниченный подбор совместимых параметров; успешный результат запоминается для этого URL и модели до закрытия приложения.
 
 Консольное меню доступно через `python src/main.py --cli`. Оконная сборка `.exe` также принимает `--cli` и открывает консоль для этого режима. Прежние аргументы запуска сохранены.
 
@@ -574,6 +612,8 @@ node --test tests/test_gateway.mjs
 Проверки оконного интерфейса выполняются без подключения к настоящей игре. Команда `python tests/browser_desktop_check.py` дополнительно проверяет автоматизацию на локальных тестовых страницах в отдельном Edge без видимого окна.
 
 Для сборки в Windows установите PyInstaller в окружение с зависимостями проекта и выполните `python scripts/build_windows.py`. Результат сохраняется в `dist/<version>/WaygroundAutomator.exe`; `--console` создаёт диагностическую сборку в `scratch/gui-debug`.
+
+Для подготовки нативной сборки Linux/macOS используйте `python scripts/build_desktop.py --dry-run` в соответствующей ОС. Команда только показывает параметры. Зависимости, формат `.app`, ограничения горячих клавиш и ручные проверки CI описаны в [документации платформ](docs/platform-support.md). Бинарники v4.1 пока не собирались.
 
 <p align="center">
   <sub>Built with <a href="https://playwright.dev/python/">Playwright</a> · Python 3.10+</sub>

@@ -1,10 +1,8 @@
 """Native desktop windows. Browser work stays on the backend's asyncio thread."""
 
 import ctypes
-from ctypes import wintypes
 import json
 import math
-import os
 from pathlib import Path
 import re
 import sys
@@ -23,7 +21,8 @@ from PySide6.QtWidgets import (
 
 import config
 from desktop_backend import DesktopBackend
-from desktop_engines import engine_catalog
+from desktop_engines import engine_catalog, personal_engine
+from app_paths import app_config_dir
 
 
 ASSETS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "assets"
@@ -54,7 +53,7 @@ def load_icon(name: str, dark: bool = True) -> QIcon:
 class Preferences:
     """Only display/runtime preferences; never account secrets, keys or game data."""
     def __init__(self, path=None):
-        self.path = Path(path) if path else Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "WaygroundAutomator" / "ui.json"
+        self.path = Path(path) if path else app_config_dir() / "ui.json"
         self.values = dict(DEFAULTS)
         try:
             values = json.loads(self.path.read_text(encoding="utf-8"))
@@ -132,12 +131,14 @@ class BossKey(QAbstractNativeEventFilter):
                 self.shortcut.deleteLater()
             if choice != "Disabled":
                 self.shortcut = QShortcut(QKeySequence(choice), self.window)
+                self.shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
                 self.shortcut.activated.connect(self.window.toggle_hidden)
         self.current = choice
         return True
 
     def nativeEventFilter(self, event_type, message):
         if self.enabled and sys.platform == "win32" and bytes(event_type) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+            from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == 0x312 and msg.wParam == self.HOTKEY_ID:
                 self.window.toggle_hidden()
@@ -157,6 +158,14 @@ def label(text="", *, style="", wrap=False):
     if style:
         widget.setObjectName(style)
     return widget
+
+
+def drag_offset(window, event):
+    # Wayland does not allow clients to reposition their windows directly.
+    handle = window.windowHandle()
+    if QApplication.platformName().startswith("wayland") and handle and handle.startSystemMove():
+        return None
+    return event.globalPosition().toPoint() - window.frameGeometry().topLeft()
 
 
 class SpacedButton(QPushButton):
@@ -406,8 +415,34 @@ class SettingsDrawer(QDialog):
         ai.addWidget(label("AI engine", style="step_title"))
         self.engine = engine_combo(owner.engines)
         self.engine.setCurrentIndex(max(0, self.engine.findData(owner.prefs.values["engine"])))
-        self.engine.currentIndexChanged.connect(self.switch_engine)
+        self.engine.currentIndexChanged.connect(self.engine_changed)
         ai.addWidget(self.engine)
+        self._pending_personal_engine = None
+        self.custom_api = QWidget()
+        custom = QVBoxLayout(self.custom_api)
+        custom.setContentsMargins(0, 0, 0, 0)
+        custom.setSpacing(6)
+        direct = owner.engines["direct"]
+        custom.addWidget(label("API base URL", style="muted"))
+        self.api_url = QLineEdit(direct.base)
+        self.api_url.setPlaceholderText("https://your-provider.example/v1")
+        custom.addWidget(self.api_url)
+        custom.addWidget(label("API key", style="muted"))
+        self.api_key = QLineEdit(direct.key)
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        custom.addWidget(self.api_key)
+        self.show_api_key = QCheckBox("Show API key")
+        self.show_api_key.toggled.connect(lambda checked: self.api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password))
+        custom.addWidget(self.show_api_key)
+        custom.addWidget(label("Model", style="muted"))
+        self.api_model = QLineEdit(direct.model or "")
+        self.api_model.setPlaceholderText("Model name from your API provider")
+        custom.addWidget(self.api_model)
+        custom.addWidget(label("OpenAI-compatible API. Changes apply after a successful check and last until the app closes.",
+                               style="muted", wrap=True))
+        ai.addWidget(self.custom_api)
+        self.custom_api.setVisible(self.engine.currentData() == "direct")
         self.provider_check = button("Check / apply engine", self.switch_engine)
         ai.addWidget(self.provider_check)
         self.provider_status = label("Checked with a real test request", style="muted", wrap=True)
@@ -438,7 +473,10 @@ class SettingsDrawer(QDialog):
         self.boss.setCurrentText(owner.prefs.values["boss"])
         self.boss.currentTextChanged.connect(owner.set_boss_key)
         automation.addWidget(self.boss)
-        automation.addWidget(label("Hiding keeps automation running.", style="muted", wrap=True))
+        self.boss_hint = label("Hiding keeps automation running." if sys.platform == "win32" else
+                               "Shortcut works while this app is focused. Restore from the tray or taskbar/Dock.",
+                               style="muted", wrap=True)
+        automation.addWidget(self.boss_hint)
         body.addLayout(automation)
         body.addWidget(divider())
 
@@ -469,6 +507,19 @@ class SettingsDrawer(QDialog):
         layout.addWidget(self.done_button)
         self.surface.installEventFilter(self)
         self.body.installEventFilter(self)
+
+    def engine_changed(self, *_):
+        direct = self.engine.currentData() == "direct"
+        self.custom_api.setVisible(direct)
+        if direct:
+            self.provider_status.setText("Enter your API settings, then click Check / apply engine.")
+        else:
+            self.switch_engine()
+
+    def set_check_busy(self, busy):
+        self.provider_check.setEnabled(not busy)
+        self.engine.setEnabled(not busy)
+        self.custom_api.setEnabled(not busy)
 
     def apply_theme(self):
         dark = self.owner.prefs.values["dark"]
@@ -510,9 +561,19 @@ class SettingsDrawer(QDialog):
             self.provider_status.setText("Wait for the current check to finish.")
             return
         engine_id = self.engine.currentData()
-        self.owner.command("check_engine", engine_id=engine_id, live=self.owner.running)
+        arguments = {"engine_id": engine_id, "live": self.owner.running}
+        if engine_id == "direct":
+            try:
+                engine = personal_engine(self.api_url.text(), self.api_key.text(), self.api_model.text())
+            except ValueError as exc:
+                self.provider_status.setText(str(exc))
+                return
+            self._pending_personal_engine = engine
+            arguments["custom_api"] = {"base": engine.base, "key": engine.key, "model": engine.model}
+        self.owner.command("check_engine", **arguments)
 
     def showEvent(self, event):
+        self.show_api_key.setChecked(False)
         self.stop.setEnabled(self.owner.running or self.owner.busy)
         self.wrong.setMinimum(0)
         self.wrong.setMaximum(max(self.owner.wrong_used, self.owner.total or 999))
@@ -524,7 +585,7 @@ class SettingsDrawer(QDialog):
             self._schedule_fit()
         if watched in (self.header, self.header_icon, self.header_title):
             if event.type() == event.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._drag = drag_offset(self, event)
             elif event.type() == event.Type.MouseMove and self._drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
                 self.move(event.globalPosition().toPoint() - self._drag)
             elif event.type() == event.Type.MouseButtonRelease:
@@ -537,7 +598,7 @@ class DesktopWindow(QMainWindow):
         super().__init__()
         self.setLocale(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
         self.setWindowTitle(f"Wayground Pro v{config.VERSION}")
-        self.setWindowIcon(QIcon(str(ASSETS_DIR / "icon.ico")))
+        self.setWindowIcon(QIcon(str(ASSETS_DIR / ("icon.ico" if sys.platform == "win32" else "logo.png"))))
         self.prefs = prefs or Preferences()
         self.engines = engine_catalog()
         self.hub = EventHub(self)
@@ -766,6 +827,9 @@ class DesktopWindow(QMainWindow):
         self.engine.setCurrentIndex(max(0, self.engine.findData(self.prefs.values["engine"])))
         self.engine.currentIndexChanged.connect(self.startup_engine_changed)
         col_right.addWidget(self.engine)
+        self.custom_api_button = button("Configure personal API", self.show_settings)
+        self.custom_api_button.setVisible(self.engine.currentData() == "direct")
+        col_right.addWidget(self.custom_api_button)
         grid.addLayout(col_right, 1)
 
         sec3.addLayout(grid)
@@ -1501,6 +1565,7 @@ class DesktopWindow(QMainWindow):
 
     def startup_engine_changed(self, *_):
         self.prefs.set(engine=self.engine.currentData())
+        self.custom_api_button.setVisible(self.engine.currentData() == "direct")
         self.provider_status.setText("Not checked")
         if self.mode.currentData() != "keys":
             self.invalidate()
@@ -1508,6 +1573,7 @@ class DesktopWindow(QMainWindow):
             self.drawer.engine.blockSignals(True)
             self.drawer.engine.setCurrentIndex(self.drawer.engine.findData(self.engine.currentData()))
             self.drawer.engine.blockSignals(False)
+            self.drawer.custom_api.setVisible(self.engine.currentData() == "direct")
 
     def toggle_advanced(self):
         visible = not self.advanced.isVisible()
@@ -1548,7 +1614,7 @@ class DesktopWindow(QMainWindow):
         self._pending_start = self._startup_signature() if start_after else None
         self.prepared = None
         self.busy = True
-        self.drawer.provider_check.setEnabled(False)
+        self.drawer.set_check_busy(True)
         self._startup_enabled()
         self.prefs.set(cheatnetwork=self.cheatnetwork.isChecked(), quizit=self.quizit.isChecked())
         self.command("prepare", tab_id=self.target.currentData(), pin=self.pin.text(),
@@ -1661,12 +1727,15 @@ class DesktopWindow(QMainWindow):
             self.show()
 
     def toggle_hidden(self):
-        if self.isVisible():
+        if self.isVisible() and not self.isMinimized():
             self.drawer.hide()
             self.logs_dialog.hide()
             if self.keys_dialog:
                 self.keys_dialog.hide()
-            self.hide()
+            if sys.platform != "win32" and self.tray is None:
+                self.showMinimized()
+            else:
+                self.hide()
         else:
             self.show_overlay()
 
@@ -1723,7 +1792,7 @@ class DesktopWindow(QMainWindow):
             return
         if kind == "busy":
             self.busy = event["busy"]
-            self.drawer.provider_check.setEnabled(not self.busy)
+            self.drawer.set_check_busy(self.busy)
         elif kind == "browser":
             self.connected = event["connected"]
             if self.connected:
@@ -1787,10 +1856,21 @@ class DesktopWindow(QMainWindow):
                 self.new_test.show()
             if kind == "error" and event.get("operation") == "prepare":
                 self.prepared = None
+            if kind == "error" and event.get("operation") == "check_engine":
+                self.drawer.provider_status.setText(message)
             if kind in ("error", "session_lost"):
                 self._pending_start = None
                 self._launch_pending = False
         elif kind == "provider_check":
+            if event.get("custom") and not event.get("pending"):
+                engine = self.drawer._pending_personal_engine
+                self.drawer._pending_personal_engine = None
+                if event.get("available") and engine:
+                    self.engines["direct"] = engine
+                    for combo in (self.engine, self.drawer.engine):
+                        combo.setItemText(combo.findData("direct"), engine.label)
+                    if not self.running and self.mode.currentData() != "keys":
+                        self.invalidate()
             if event.get("pending"):
                 text = "Checking…"
             else:
@@ -1803,12 +1883,14 @@ class DesktopWindow(QMainWindow):
                 self.engine.blockSignals(True)
                 self.engine.setCurrentIndex(self.engine.findData(event["id"]))
                 self.engine.blockSignals(False)
+                self.custom_api_button.setVisible(event["id"] == "direct")
                 self.provider_status.setText(text)
             elif event.get("available") and not self.running:
                 self.prefs.set(engine=event["id"])
                 self.engine.blockSignals(True)
                 self.engine.setCurrentIndex(self.engine.findData(event["id"]))
                 self.engine.blockSignals(False)
+                self.custom_api_button.setVisible(event["id"] == "direct")
                 self.provider_status.setText(text)
                 if self.mode.currentData() != "keys" and self.prepared and self.prepared["engine_id"] != event["id"]:
                     self.invalidate()
@@ -1984,7 +2066,7 @@ class DesktopWindow(QMainWindow):
             self._schedule_runtime_fit()
         if watched in (self.header, self.brand, self.brand_icon, self.brand_ver, self.mini_stats):
             if event.type() == event.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._drag = drag_offset(self, event)
             elif event.type() == event.Type.MouseMove and self._drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
                 self.move(event.globalPosition().toPoint() - self._drag)
             elif event.type() == event.Type.MouseButtonRelease:

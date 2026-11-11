@@ -1,11 +1,12 @@
 """Explicit offline browser integration checks: python tests/browser_desktop_check.py.
 
-Uses a fresh headless Edge process and local fixture HTML, never a live game.
+Uses a fresh headless browser and local fixture HTML, never a live game.
 """
 
 import asyncio
 import contextlib
 import io
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -14,8 +15,11 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from playwright.async_api import async_playwright
 from answer_db import AnswerDatabase
-from automation import automate_test, highlight_answer, clear_highlights
-from runtime_control import RuntimeControl, RunStopped
+from automation import (
+    automate_test, highlight_answer, clear_highlights, _handle_answer_explanation,
+    _wait_for_question_or_end, _wait_for_transition, _advance_if_next_button,
+)
+from runtime_control import RuntimeControl, RunStopped, ACTIVE_CONTROL
 from desktop_backend import DesktopBackend
 from session_binding import SessionBinding
 import config
@@ -42,10 +46,31 @@ OPEN = """<!doctype html><span data-cy="current-question-number">1</span>
 document.getElementById('game').innerHTML='<div data-cy="screen-summary">Completed</div>';}</script>"""
 
 
+EXPLANATION_PANEL = """<aside id="answer-feedback" style="position:fixed;inset:0;z-index:10002;background:#17001c;color:white">
+<div data-testid="answer-explanation-container">
+<div class="header">Ответ Объяснение</div>
+<div class="all-content">A focused topic limits the scope to material that can be explained clearly in the allotted time.</div>
+<div class="py-3"><div class="cursor-pointer" onclick="advance()">Следующий вопрос</div></div>
+</div></aside>"""
+
+
+def explanation_fixture(delay=0):
+    # Keep the answered question and all its options visible below the feedback,
+    # just as the real sidebar does; only its div control advances the game.
+    script = ("window.feedbackClicks=0;function choose(answer){submissions.push(answer);"
+              f"setTimeout(()=>document.body.insertAdjacentHTML('beforeend', `{EXPLANATION_PANEL}`), {delay});"
+              "}function advance(){feedbackClicks++;document.getElementById('answer-feedback').remove();n++;")
+    return MCQ.replace("function choose(answer){submissions.push(answer);n++;", script)
+
+
 class BrowserIntegration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(channel="msedge", headless=True)
+        channel = os.environ.get("WAYGROUND_TEST_BROWSER_CHANNEL", "msedge" if sys.platform == "win32" else "")
+        options = {"headless": True}
+        if channel:
+            options["channel"] = channel
+        self.browser = await self.playwright.chromium.launch(**options)
         self.page = await self.browser.new_page()
         self.events = []
         self.control = RuntimeControl(self.events.append, delay=0, highlight=True)
@@ -75,6 +100,70 @@ class BrowserIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(complete)
         self.assertEqual(await self.page.evaluate("submissions"), ["A", "D"])
         self.assertEqual(sum(e["type"] == "submitted" for e in self.events), 2)
+
+    async def test_div_feedback_control_advances_each_question_without_reanswering(self):
+        await self.page.set_content(explanation_fixture())
+        complete = await asyncio.wait_for(automate_test(self.page, self.keys(), expected_total=2,
+                                          use_ai=False, control=self.control), 20)
+        self.assertTrue(complete)
+        self.assertEqual(await self.page.evaluate("submissions"), ["A", "D"])
+        self.assertEqual(await self.page.evaluate("feedbackClicks"), 2)
+        self.assertEqual(sum(e["type"] == "submitted" for e in self.events), 2)
+
+    async def test_delayed_feedback_is_closed_during_transition(self):
+        await self.page.set_content(explanation_fixture(delay=150))
+        await self.page.evaluate("choose('A')")
+        self.assertTrue(await _wait_for_transition(self.page, "Which is correct?", old_q_num=1, timeout=3))
+        self.assertEqual(await self.page.evaluate("submissions"), ["A"])
+        self.assertEqual(await self.page.evaluate("feedbackClicks"), 1)
+        self.assertEqual(await self.page.locator('[data-cy="current-question-number"]').inner_text(), "2")
+
+    async def test_wait_closes_feedback_before_returning_question_beneath_it(self):
+        await self.page.set_content(explanation_fixture())
+        await self.page.evaluate("choose('A')")
+        await self.page.locator('[data-testid="answer-explanation-container"]').wait_for()
+        status, info = await _wait_for_question_or_end(self.page, max_wait=3)
+        self.assertEqual((status, info["qid"]), ("question", "q2"))
+        self.assertEqual(await self.page.evaluate("submissions"), ["A"])
+        self.assertEqual(await self.page.locator('#answer-feedback').count(), 0)
+
+    async def test_feedback_without_ready_control_blocks_underlying_navigation_and_question(self):
+        await self.page.set_content(MCQ + EXPLANATION_PANEL.replace('onclick="advance()"', 'aria-disabled="true"')
+                                    + '<button onclick="window.underlyingClicked=true">Next</button>'
+                                    + '<div data-cy="screen-summary">Results behind the feedback</div>')
+        self.assertTrue(await _advance_if_next_button(self.page))
+        status, _ = await _wait_for_question_or_end(self.page, max_wait=0.1)
+        self.assertEqual(status, "timeout")
+        self.assertFalse(await self.page.evaluate("!!window.underlyingClicked"))
+        self.assertEqual(await self.page.evaluate("submissions"), [])
+
+    async def test_feedback_controls_are_scoped_visible_and_localized(self):
+        for caption in ("Следующий вопрос", "Next question", "Наступне питання", "Наступне запитання"):
+            with self.subTest(caption=caption):
+                panel = EXPLANATION_PANEL.replace("Следующий вопрос", caption)
+                await self.page.set_content(panel + "<script>window.feedbackClicks=0;function advance(){feedbackClicks++;document.getElementById('answer-feedback').remove()}</script>")
+                self.assertTrue(await _handle_answer_explanation(self.page))
+                self.assertEqual(await self.page.evaluate("feedbackClicks"), 1)
+        await self.page.set_content(EXPLANATION_PANEL)
+        await self.page.locator('#answer-feedback').evaluate("el=>el.style.display='none'")
+        self.assertFalse(await _handle_answer_explanation(self.page))
+
+    async def test_stopping_while_paused_does_not_dismiss_feedback(self):
+        await self.page.set_content(explanation_fixture())
+        await self.page.evaluate("choose('A')")
+        await self.page.locator('[data-testid="answer-explanation-container"]').wait_for()
+        self.control.pause(True)
+        token = ACTIVE_CONTROL.set(self.control)
+        try:
+            task = asyncio.create_task(_handle_answer_explanation(self.page))
+            await asyncio.sleep(0.1)
+            self.assertFalse(task.done())
+            self.control.stop()
+            with self.assertRaises(RunStopped):
+                await task
+        finally:
+            ACTIVE_CONTROL.reset(token)
+        self.assertEqual(await self.page.evaluate("feedbackClicks"), 0)
 
     async def test_pause_and_stop_leave_current_question_unsubmitted(self):
         await self.page.set_content(MCQ)
