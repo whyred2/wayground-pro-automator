@@ -12,7 +12,7 @@ import time
 from config import (
     SEL_CURRENT_QUESTION, SEL_CURRENT_QUESTION_INNER, SEL_QUESTION_MEDIA,
     SEL_OPTION_BUTTON, SEL_OPTION_TEXT, SEL_SUBMIT_BUTTON, SEL_CONTINUE_BUTTON, SEL_REDEMPTION_BUTTON,
-    SEL_FIB_INPUT,
+    SEL_FIB_INPUT, SEL_ANSWER_EXPLANATION,
     SEL_CURRENT_Q_NUM, SEL_TOTAL_Q_NUM,
     SEL_RESULTS_CONTAINER, SEL_STAT_CORRECT, SEL_STAT_INCORRECT, SEL_STAT_AVG_TIME, SEL_STAT_STREAK,
     SEL_ACCURACY_TOOLTIP,
@@ -337,6 +337,46 @@ async def _extract_question_info(page) -> dict:
         return {"qid": None, "text": "", "image": ""}
 
 
+async def _handle_answer_explanation(page) -> bool:
+    """Dismiss feedback through its own control; visible feedback blocks all other actions."""
+    try:
+        panels = await page.query_selector_all(SEL_ANSWER_EXPLANATION)
+    except Exception:
+        return False
+    for panel in panels:
+        try:
+            if not await panel.is_visible():
+                continue
+        except Exception:
+            continue
+        try:
+            handle = await panel.evaluate_handle(r"""
+                root => {
+                    const candidates = Array.from(root.querySelectorAll(
+                        'button, [role="button"], .cursor-pointer, [tabindex]'
+                    ));
+                    return candidates.find(el => {
+                        const rect = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        if (!rect.width || !rect.height || style.visibility === 'hidden' ||
+                            style.display === 'none' || el.disabled ||
+                            el.getAttribute('aria-disabled') === 'true') return false;
+                        const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+                            .replace(/\s+/g, ' ').trim();
+                        return /^(?:next question|следующий вопрос|наступне (?:питання|запитання)|далі|далее|next|continue|продолжить|продовжити)(?:\s*[→›»>])?$/i.test(text);
+                    }) || null;
+                }
+            """)
+            next_control = handle.as_element()
+            if next_control and await _safe_click(next_control, "answer explanation: next question"):
+                log_step("Closed answer explanation with Next question.")
+        except Exception:
+            pass
+        # Even if the control is not ready yet, never click the question behind it.
+        return True
+    return False
+
+
 async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60) -> tuple[str, any]:
     """
     Polls the page for up to `max_wait` seconds.
@@ -352,6 +392,10 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
 
     while elapsed < max_wait:
         await checkpoint()
+        if await _handle_answer_explanation(page):
+            await asyncio.sleep(step)
+            elapsed += step
+            continue
         # 1. Check if results screen is visible
         try:
             results_el = await page.query_selector(SEL_RESULTS_CONTAINER)
@@ -451,9 +495,11 @@ async def _wait_for_question_or_end(page, last_key: str = "", max_wait: int = 60
         elapsed += step
 
     # Final check for results after timeout
+    if await _handle_answer_explanation(page):
+        return ('timeout', None)
     try:
         results_el = await page.query_selector(SEL_RESULTS_CONTAINER)
-        if results_el:
+        if results_el and await results_el.is_visible():
             return ('ended', None)
     except Exception:
         pass
@@ -507,6 +553,8 @@ async def _advance_if_next_button(page) -> bool:
     only selects the radio button or checkbox. A localized 'Next' / 'Submit' button
     must be clicked to actually submit the answer and transition to the next question.
     """
+    if await _handle_answer_explanation(page):
+        return True
     try:
         btn_handle = await page.evaluate_handle("""
             () => {
@@ -585,6 +633,9 @@ async def _wait_for_transition(page, old_text: str = "", old_image: str = "", ol
         await checkpoint()
         await asyncio.sleep(step)
         elapsed += step
+
+        if await _handle_answer_explanation(page):
+            continue
 
         # 1. Results page appeared?
         try:

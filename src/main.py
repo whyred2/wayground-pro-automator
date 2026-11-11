@@ -18,10 +18,10 @@ import re
 # Suppress Node.js deprecation warnings (DEP0169 from Playwright internals)
 os.environ["NODE_OPTIONS"] = "--no-deprecation"
 
-# force Playwright (in the compiled .exe) to search for browsers in the global folder
+# Frozen applications use the same browser cache as a source installation.
 if getattr(sys, 'frozen', False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
-    _local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(_local_appdata, "ms-playwright")
+    from app_paths import playwright_cache_dir
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(playwright_cache_dir())
 
 try:
     from playwright.async_api import async_playwright
@@ -379,15 +379,8 @@ Modes:
                 else:
                     raise e
 
-            UA = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-
             ctx_test = await browser.new_context(
                 viewport={"width": 1280, "height": 900},
-                user_agent=UA,
             )
             page_test = await ctx_test.new_page()
             reset_answer_state()
@@ -756,7 +749,7 @@ async def _run_phases(page_test, browser, args):
 
 if __name__ == "__main__":
     if "--gui-smoke" in sys.argv:
-        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from desktop_smoke import run_smoke
         run_smoke(sys.argv[sys.argv.index("--gui-smoke") + 1])
         sys.exit(0)

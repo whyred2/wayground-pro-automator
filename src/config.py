@@ -5,14 +5,16 @@ Configuration: constants, CSS selectors, timing parameters, and console colors.
 import os
 import sys
 
-VERSION = "4.0"
+from app_paths import executable_directory
+
+VERSION = "4.1"
 
 
 def _load_dotenv():
     """Lightweight loader for .env file in project root, avoiding mandatory external dependencies."""
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if getattr(sys, "frozen", False):
-        root_dir = os.path.dirname(sys.executable)
+        root_dir = str(executable_directory())
     env_file = os.path.join(root_dir, ".env")
     if os.path.isfile(env_file):
         try:
@@ -97,6 +99,8 @@ SEL_SUBMIT_BUTTON = (
 )
 
 # Intermission & action selectors (click if blocking)
+SEL_ANSWER_EXPLANATION = '[data-testid="answer-explanation-container"]'
+
 SEL_CONTINUE_BUTTON = (
     'button[data-cy="next-button"], button:has-text("Next"), button:has-text("Continue"), '
     'button:has-text("Продолжить"), button:has-text("Далее"), button:has-text("Skip"), '

@@ -303,6 +303,72 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((config.AI_MODEL, config.AI_GATEWAY_MODEL, config.AI_API_BASE), original)
         self.assertEqual(self.backend.control._engine_pending.id, "groq-120b")
 
+    async def test_custom_api_is_checked_and_used_by_preparation(self):
+        original = self.backend.engines["direct"]
+        custom = {"base": " https://personal.example/v1/ ", "key": " personal-secret ", "model": " personal-model "}
+        engine = desktop_engines.personal_engine(**custom)
+        with patch("desktop_backend.probe", AsyncMock(return_value=(True, "Connected"))) as probe:
+            await self.backend._check_engine("direct", custom_api=custom)
+        probe.assert_awaited_once_with(engine)
+        self.assertEqual(self.backend.engines["direct"], engine)
+        self.assertNotEqual(original, engine)
+        self.assertNotIn("personal-secret", str(self.events))
+        with patch("desktop_backend.api.fetch_game_snapshot", return_value=self.snapshot), \
+                patch("desktop_backend.probe", AsyncMock(return_value=(True, "Connected"))) as probe, \
+                patch.object(self.backend, "_apply_engine") as apply:
+            await self.backend._prepare("tab", mode="ai", engine_id="direct", cheatnetwork=False)
+        probe.assert_awaited_once_with(engine)
+        apply.assert_called_once_with(engine)
+        self.assertTrue(self.backend.prepared.ready)
+
+    async def test_failed_custom_api_preserves_catalog_preparation_and_active_request(self):
+        original = self.backend.engines["direct"]
+        await self.prepare()
+        prepared = self.backend.prepared
+        self.backend.control = RuntimeControl(self.events.append)
+        custom = {"base": "https://personal.example/v1", "key": "rejected-secret", "model": "model"}
+        with patch("desktop_backend.probe", AsyncMock(return_value=(False, "Invalid rejected-secret"))):
+            await self.backend._check_engine("direct", live=True, custom_api=custom)
+        self.assertEqual(self.backend.engines["direct"], original)
+        self.assertIs(self.backend.prepared, prepared)
+        self.assertIsNone(self.backend.control._engine_pending)
+        self.assertNotIn("rejected-secret", str(self.events))
+
+    async def test_custom_live_switch_waits_for_next_request_and_redacts_replaced_keys(self):
+        original = (config.AI_API_KEY, config.AI_API_BASE, config.AI_MODEL, config.AI_GATEWAY_URL)
+        self.backend.control = RuntimeControl(self.events.append)
+        with patch("desktop_backend.probe", AsyncMock(return_value=(True, "Connected"))):
+            for key in ("first-personal-secret", "second-personal-secret"):
+                await self.backend._check_engine("direct", live=True, custom_api={
+                    "base": "https://personal.example/v1", "key": key, "model": "personal-model"})
+        self.assertEqual((config.AI_API_KEY, config.AI_API_BASE, config.AI_MODEL, config.AI_GATEWAY_URL), original)
+        engine = self.backend.control._engine_pending
+        self.assertEqual((engine.key, engine.base, engine.model, engine.gateway),
+                         ("second-personal-secret", "https://personal.example/v1", "personal-model", ""))
+        self.assertEqual(self.backend.clean("first-personal-secret second-personal-secret"), "[redacted] [redacted]")
+
+    async def test_invalid_custom_settings_never_probe_or_replace_engine(self):
+        original = self.backend.engines["direct"]
+        with patch("desktop_backend.probe", AsyncMock()) as probe:
+            for base, key, model in [
+                ("not-a-url", "key", "model"), ("file:///tmp/api", "key", "model"),
+                ("https://user:secret@example.com/v1", "key", "model"),
+                ("https://example.com/v1?key=secret", "key", "model"),
+                ("https://example.com:invalid/v1", "key", "model"),
+                ("https://example.com/v1", " ", "model"), ("https://example.com/v1", "key", " "),
+            ]:
+                with self.subTest(base=base, key=key, model=model), self.assertRaises(ValueError):
+                    await self.backend._check_engine("direct", custom_api={"base": base, "key": key, "model": model})
+        probe.assert_not_awaited()
+        self.assertEqual(self.backend.engines["direct"], original)
+
+    async def test_custom_probe_redacts_key_before_it_is_active(self):
+        engine = desktop_engines.personal_engine("http://localhost:8000/v1", "unapplied-secret", "local-model")
+        with patch("desktop_engines.test_ai_connection", return_value=(False, "Invalid unapplied-secret")):
+            self.assertEqual(await desktop_engines.probe(engine), (False, "Invalid [redacted]"))
+        with patch("desktop_engines.test_ai_connection", side_effect=RuntimeError("unapplied-secret")):
+            self.assertEqual(await desktop_engines.probe(engine), (False, "[redacted]"))
+
     async def test_shutdown_disconnects_without_closing_browser(self):
         self.backend.loop = Mock()
         self.backend.playwright = SimpleNamespace(stop=AsyncMock())

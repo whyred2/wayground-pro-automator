@@ -3,35 +3,62 @@ Browser auto-detection and launching with Chrome DevTools Protocol (CDP) debuggi
 """
 
 import os
+from pathlib import Path
+import shutil
 import sys
 import subprocess
 import time
 
 from config import C_BOLD, C_DIM, C_YELLOW, C_RESET
 from ui import log_info, log_error, log_step
+from app_paths import app_data_dir
 
 
 def find_browser_exe() -> tuple[str, str]:
     """
-    Auto-detect Edge or Chrome executable on Windows.
+    Auto-detect an installed Edge, Chrome or Chromium on the current platform.
     Returns (path, name) or exits if not found.
     """
-    candidates = [
-        # Edge (most common on Windows)
-        (os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
-        (os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
-        (os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
-        # Chrome
-        (os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"), "Chrome"),
-        (os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"), "Chrome"),
-        (os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"), "Chrome"),
-    ]
+    override = os.environ.get("WAYGROUND_BROWSER", "").strip()
+    if override:
+        path = shutil.which(override)
+        if path:
+            return path, "Custom browser"
+        log_error("WAYGROUND_BROWSER must name an executable browser path or command.")
+        sys.exit(1)
+    candidates = []
+    if sys.platform == "win32":
+        candidates = [
+            # Keep the existing Windows preference for Edge.
+            (os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
+            (os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
+            (os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"), "Edge"),
+            (os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"), "Chrome"),
+            (os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"), "Chrome"),
+            (os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"), "Chrome"),
+        ]
+    elif sys.platform == "darwin":
+        for directory in (Path("/Applications"), Path.home() / "Applications"):
+            for bundle, binary, name in (
+                ("Microsoft Edge", "Microsoft Edge", "Edge"),
+                ("Google Chrome", "Google Chrome", "Chrome"),
+                ("Chromium", "Chromium", "Chromium"),
+            ):
+                candidates.append((str(directory / f"{bundle}.app" / "Contents" / "MacOS" / binary), name))
+    for command, name in (
+        ("microsoft-edge", "Edge"), ("microsoft-edge-stable", "Edge"),
+        ("google-chrome", "Chrome"), ("google-chrome-stable", "Chrome"),
+        ("chromium", "Chromium"), ("chromium-browser", "Chromium"),
+    ):
+        path = shutil.which(command)
+        if path:
+            candidates.append((path, name))
 
     for path, name in candidates:
-        if os.path.isfile(path):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
             return path, name
 
-    log_error("Could not find Edge or Chrome!")
+    log_error("Could not find Edge, Chrome or Chromium. Install one or set WAYGROUND_BROWSER.")
     print(f"  {C_DIM}Looked in:{C_RESET}")
     for path, name in candidates:
         print(f"    {C_DIM}{path}{C_RESET}")
@@ -44,9 +71,9 @@ def get_user_data_dir(browser_name: str) -> str:
     Using a dedicated profile prevents conflicts with already running Edge/Chrome instances,
     ensures the debug port opens instantly, and permanently preserves Wayground logins.
     """
-    profile_dir = os.path.expandvars(r"%LocalAppData%\WaygroundAutomator\BrowserProfile")
-    os.makedirs(profile_dir, exist_ok=True)
-    return profile_dir
+    profile_dir = app_data_dir() / "BrowserProfile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return str(profile_dir)
 
 
 def is_port_open(port: int) -> bool:
@@ -81,12 +108,12 @@ def launch_browser_with_debug(port: int, *, interactive: bool = True) -> subproc
     ]
 
     log_info(f"Launching {browser_name} with debug port {port}...")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=(subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0,
-    )
+    process_options = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        process_options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **process_options)
 
     # Wait for browser to start and open the debug port (typically 1-2 seconds with dedicated profile)
     for i in range(12):
@@ -104,24 +131,23 @@ def launch_browser_with_debug(port: int, *, interactive: bool = True) -> subproc
         )
     print()
     log_error(f"{browser_name} is running, but port {port} is not responding.")
-    log_info("This usually happens because the browser is ALREADY open in normal mode.")
-    log_info(f"We can safely restart {browser_name} for you (all your tabs will be restored).")
+    log_info("Check whether the Automator profile is already open or the debug port is blocked.")
+    log_info(f"We can retry the dedicated {browser_name} process launched by this program.")
     
     confirm = input(f"  {C_BOLD}[?]{C_RESET} Do you want to automatically restart {browser_name}? (y/n) [y]: ").strip().lower()
     
     if confirm not in ("n", "no"):
-        log_info(f"Closing existing {browser_name} processes...")
-        exe_name = os.path.basename(exe_path)
-        subprocess.run(["taskkill", "/F", "/IM", exe_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(3)  # Give processes a moment to fully terminate
+        if proc.poll() is None:
+            log_info(f"Closing the launched {browser_name} process...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
         
         log_info(f"Relaunching {browser_name} with debug port...")
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
-        )
+        proc = subprocess.Popen(cmd, **process_options)
         for i in range(15):
             if is_port_open(port):
                 log_info(f"{browser_name} successfully restarted! (port {port})")

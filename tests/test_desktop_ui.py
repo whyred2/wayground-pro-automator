@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -11,10 +12,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QFontDatabase, QMouseEvent
+from PySide6.QtGui import QFontDatabase, QMouseEvent, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionButton, QTableWidget
-from desktop import DesktopWindow, Preferences
+from PySide6.QtWidgets import QApplication, QLineEdit, QStyle, QStyleOptionButton, QTableWidget
+from desktop import DesktopWindow, Preferences, BossKey, drag_offset
 from desktop_smoke import MemoryPreferences, OfflineBackend, prepared_event
 
 
@@ -99,6 +100,84 @@ class WindowTests(unittest.TestCase):
         self.window.drawer.engine.setCurrentIndex(self.window.drawer.engine.findData("groq-120b"))
         self.assertEqual(self.window.backend.commands[-1], ("check_engine", {"engine_id": "groq-120b", "live": True}))
         self.assertTrue(self.window.running)
+
+    def fill_personal_api(self):
+        drawer = self.window.drawer
+        drawer.engine.setCurrentIndex(drawer.engine.findData("direct"))
+        drawer.api_url.setText(" https://personal.example/v1/ ")
+        drawer.api_key.setText(" personal-secret ")
+        drawer.api_model.setText(" personal-model ")
+        return drawer
+
+    def test_personal_api_form_is_accessible_from_startup_and_masks_key(self):
+        self.window.mode.setCurrentIndex(self.window.mode.findData("ai"))
+        self.window.engine.setCurrentIndex(self.window.engine.findData("direct"))
+        self.assertTrue(self.window.custom_api_button.isVisible())
+        QTest.mouseClick(self.window.custom_api_button, Qt.MouseButton.LeftButton)
+        drawer = self.window.drawer
+        self.assertTrue(drawer.custom_api.isVisible())
+        self.assertEqual(drawer.api_key.echoMode(), QLineEdit.EchoMode.Password)
+        drawer.show_api_key.setChecked(True)
+        self.assertEqual(drawer.api_key.echoMode(), QLineEdit.EchoMode.Normal)
+        drawer.hide()
+        self.window.show_settings()
+        self.assertEqual(drawer.api_key.echoMode(), QLineEdit.EchoMode.Password)
+
+    def test_custom_api_edits_only_send_on_explicit_check(self):
+        commands = list(self.window.backend.commands)
+        drawer = self.fill_personal_api()
+        self.assertEqual(self.window.backend.commands, commands)
+        drawer.switch_engine()
+        self.assertEqual(self.window.backend.commands[-1], ("check_engine", {
+            "engine_id": "direct", "live": False, "custom_api": {
+                "base": "https://personal.example/v1", "key": "personal-secret", "model": "personal-model"}}))
+        self.assertNotIn("personal-secret", str(self.window.prefs.values))
+
+    def test_invalid_custom_api_stays_in_form_without_request(self):
+        drawer = self.fill_personal_api()
+        commands = list(self.window.backend.commands)
+        for url, key, model, error in [
+            ("invalid", "key", "model", "URL"),
+            ("https://personal.example/v1", "", "model", "API key"),
+            ("https://personal.example/v1", "key", "", "model"),
+        ]:
+            with self.subTest(error=error):
+                drawer.api_url.setText(url)
+                drawer.api_key.setText(key)
+                drawer.api_model.setText(model)
+                drawer.switch_engine()
+                self.assertIn(error, drawer.provider_status.text())
+        self.assertEqual(self.window.backend.commands, commands)
+
+    def test_applying_custom_api_invalidates_prepared_ai_even_for_same_engine_id(self):
+        self.window.mode.setCurrentIndex(self.window.mode.findData("ai"))
+        self.window.engine.setCurrentIndex(self.window.engine.findData("direct"))
+        event = prepared_event()
+        event.update(mode="ai", engine_id="direct")
+        self.window.on_event(event)
+        drawer = self.fill_personal_api()
+        drawer.switch_engine()
+        self.window.on_event({"type": "provider_check", "id": "direct", "available": True,
+                              "pending": False, "live": False, "custom": True, "detail": "Connected"})
+        self.assertIsNone(self.window.prepared)
+        self.assertEqual(self.window.engines["direct"].key, "personal-secret")
+        self.assertEqual(self.window.engine.currentText(), "Personal API · personal-model")
+        self.assertEqual(drawer.engine.currentText(), "Personal API · personal-model")
+
+    def test_failed_custom_api_keeps_previous_engine_and_busy_check_locks_form(self):
+        original = self.window.engines["direct"]
+        drawer = self.fill_personal_api()
+        drawer.switch_engine()
+        self.window.on_event({"type": "busy", "busy": True, "operation": "check_engine"})
+        self.assertFalse(drawer.api_key.isEnabled())
+        self.assertFalse(drawer.engine.isEnabled())
+        self.window.on_event({"type": "provider_check", "id": "direct", "available": False,
+                              "pending": False, "live": False, "custom": True, "detail": "Rejected"})
+        self.window.on_event({"type": "busy", "busy": False, "operation": "check_engine"})
+        self.assertEqual(self.window.engines["direct"], original)
+        self.assertTrue(drawer.api_key.isEnabled())
+        self.assertIsNone(drawer._pending_personal_engine)
+        self.assertIn("Rejected", drawer.provider_status.text())
 
     def test_settings_matches_rounded_surface_and_has_no_system_titlebar(self):
         self.running()
@@ -276,12 +355,44 @@ class WindowTests(unittest.TestCase):
         self.window.toggle_compact()
         before = list(self.window.backend.commands)
         self.window.toggle_hidden()
-        self.assertFalse(self.window.isVisible())
+        self.assertTrue(not self.window.isVisible() or self.window.isMinimized())
         self.assertTrue(self.window.running)
         self.window.toggle_hidden()
         self.assertTrue(self.window.isVisible())
         self.assertTrue(self.window.compact)
         self.assertEqual(self.window.backend.commands, before)
+
+    def test_posix_without_tray_minimizes_and_restores_instead_of_losing_window(self):
+        for target in ("linux", "darwin"):
+            with self.subTest(platform=target), patch("desktop.sys", SimpleNamespace(platform=target)):
+                self.window.toggle_hidden()
+                self.assertTrue(self.window.isMinimized())
+                self.window.toggle_hidden()
+                self.assertTrue(self.window.isVisible())
+                self.assertFalse(self.window.isMinimized())
+
+    def test_posix_shortcut_is_application_scoped_and_ui_explains_restore(self):
+        with patch("desktop.sys", SimpleNamespace(platform="linux")):
+            other = DesktopWindow(OfflineBackend, prefs=MemoryPreferences(), native_hotkeys=False)
+            shortcut = BossKey(other, enabled=True)
+            try:
+                self.assertTrue(shortcut.configure("F8"))
+                self.assertEqual(shortcut.shortcut.context(), Qt.ShortcutContext.ApplicationShortcut)
+                self.assertIn("focused", other.drawer.boss_hint.text())
+                self.assertIn("taskbar/Dock", other.drawer.boss_hint.text())
+                self.assertFalse(other.windowIcon().isNull())
+            finally:
+                shortcut.close()
+                other.close()
+                other.deleteLater()
+
+    def test_wayland_uses_system_window_drag(self):
+        handle = Mock()
+        handle.startSystemMove.return_value = True
+        with patch("desktop.QApplication.platformName", return_value="wayland"), \
+                patch.object(self.window, "windowHandle", return_value=handle):
+            self.assertIsNone(drag_offset(self.window, Mock()))
+        handle.startSystemMove.assert_called_once()
 
     def test_answer_predictions_never_set_accuracy(self):
         self.running()
@@ -380,18 +491,25 @@ class WindowTests(unittest.TestCase):
         self.running()
         self.window.on_event({"type": "answer", "answers": ["Answer"], "can_wrong": True, "deliberate": False})
         QTest.qWait(30)
-        def has_text_color(widget, rgb):
+        def assert_text_color(widget, rgb):
             _, text_rect = widget.content_rects()
             image = widget.grab().toImage()
             expected = tuple(int(rgb[index:index + 2], 16) for index in (1, 3, 5))
-            return any(max(abs(channel - wanted) for channel, wanted in zip(
-                (image.pixelColor(x, y).red(), image.pixelColor(x, y).green(), image.pixelColor(x, y).blue()), expected)) <= 8
-                for x in range(max(0, text_rect.left()), min(image.width(), text_rect.right() + 1))
-                for y in range(max(0, text_rect.top()), min(image.height(), text_rect.bottom() + 1)))
-        self.assertTrue(has_text_color(self.window.now_button, "#ffffff"))
-        self.assertTrue(has_text_color(self.window.wrong_button, "#ffabb4"))
+            group = QPalette.ColorGroup.Active if widget.isEnabled() else QPalette.ColorGroup.Disabled
+            option = widget._option()
+            self.assertEqual(option.palette.color(group, QPalette.ColorRole.ButtonText).name(), rgb)
+            nearest = 255
+            for x in range(max(0, text_rect.left()), min(image.width(), text_rect.right() + 1)):
+                for y in range(max(0, text_rect.top()), min(image.height(), text_rect.bottom() + 1)):
+                    pixel = image.pixel(x, y)
+                    channels = ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255)
+                    nearest = min(nearest, max(abs(channel - wanted) for channel, wanted in zip(channels, expected)))
+            # Small glyphs on Linux can be entirely antialiased, without a solid-color pixel.
+            self.assertLessEqual(nearest, 32, f"Rendered {rgb} text differs by {nearest}")
+        assert_text_color(self.window.now_button, "#ffffff")
+        assert_text_color(self.window.wrong_button, "#ffabb4")
         self.window.wrong_button.setEnabled(False)
-        self.assertTrue(has_text_color(self.window.wrong_button, "#8e9eb5"))
+        assert_text_color(self.window.wrong_button, "#8e9eb5")
 
     def test_icon_buttons_preserve_keyboard_and_mouse_commands(self):
         self.running()
@@ -487,10 +605,13 @@ class WindowTests(unittest.TestCase):
     def test_long_answer_grows_window_to_keep_controls_visible_when_screen_allows(self):
         self.running()
         self.window.on_event({"type": "resolved", "source": "Wayground Quiz API", "verified": True, "latency": None})
+        self.window.on_event({"type": "answer", "answers": ["Short answer"], "can_wrong": False, "deliberate": False})
+        QTest.qWait(50)
+        short_height = self.window.height()
         self.window.on_event({"type": "answer", "answers": ["A long verified response with punctuation, parentheses and repeated phrases that must wrap correctly. " * 20], "can_wrong": False, "deliberate": False})
         QTest.qWait(50)
         if self.window.screen().availableGeometry().height() >= 750:
-            self.assertGreater(self.window.height(), 440)
+            self.assertGreater(self.window.height(), short_height)
             self.assertEqual(self.window.runtime_scroll.verticalScrollBar().maximum(), 0)
             control_bottom = self.window.now_button.mapTo(self.window.runtime_scroll.viewport(), self.window.now_button.rect().bottomLeft()).y()
             self.assertLessEqual(control_bottom, self.window.runtime_scroll.viewport().height())

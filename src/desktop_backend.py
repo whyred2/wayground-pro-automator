@@ -14,7 +14,7 @@ from automation import (
     _extract_button_info, _extract_question_info, clear_highlights, highlight_answer,
 )
 from browser import is_port_open, launch_browser_with_debug
-from desktop_engines import engine_catalog, probe, apply_engine, redact
+from desktop_engines import engine_catalog, personal_engine, probe, apply_engine, redact
 from matching import _norm, _option_signature, rank_and_match_buttons, get_display_questions
 from runtime_control import RuntimeControl, RunStopped, SessionChanged, ACTIVE_CANCELLATION
 from session_binding import SessionBinding, SESSION_INFO_SCRIPT, is_game_url, session_route
@@ -120,6 +120,7 @@ class DesktopBackend:
         self.emit_callback = emit
         self.port = port
         self.engines = engine_catalog()
+        self._secrets = {engine.key for engine in self.engines.values() if engine.key}
         self.default_model = config.AI_MODEL
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._thread_main, daemon=True, name="WaygroundBrowser")
@@ -155,9 +156,8 @@ class DesktopBackend:
 
     def clean(self, message):
         text = redact(message)
-        for engine in self.engines.values():
-            if engine.key:
-                text = text.replace(engine.key, "[redacted]")
+        for secret in self._secrets:
+            text = text.replace(secret, "[redacted]")
         return text
 
     def request(self, command, **arguments):
@@ -253,7 +253,7 @@ class DesktopBackend:
                 try:
                     return launch_browser_with_debug(self.port, interactive=False)
                 except SystemExit:
-                    raise RuntimeError("Install Microsoft Edge or Google Chrome, then connect again.") from None
+                    raise RuntimeError("Install Edge, Chrome or Chromium, or set WAYGROUND_BROWSER, then connect again.") from None
             await asyncio.to_thread(launch)
         if not self.playwright:
             self.playwright = await async_playwright().start()
@@ -336,11 +336,22 @@ class DesktopBackend:
         self.prepared = None
         self.emit("invalidated")
 
-    async def _check_engine(self, engine_id, live=False):
+    async def _check_engine(self, engine_id, live=False, custom_api=None):
         engine = self.engines[engine_id]
+        if custom_api is not None:
+            if engine_id != "direct":
+                raise ValueError("Custom API settings require the Personal API engine.")
+            engine = personal_engine(**custom_api)
+            self._secrets.add(engine.key)
         self.emit("provider_check", id=engine_id, pending=True, live=live)
         ok, detail = await probe(engine)
-        self.emit("provider_check", id=engine_id, available=ok, detail=detail, pending=False, live=live)
+        if ok and custom_api is not None:
+            self.engines[engine_id] = engine
+            if not live and self.prepared and self.prepared.mode != "keys":
+                self.prepared = None
+                self.emit("invalidated")
+        self.emit("provider_check", id=engine_id, available=ok, detail=self.clean(detail),
+                  pending=False, live=live, custom=custom_api is not None)
         if ok and live and self.control:
             self.control.queue_engine(engine)
             self.emit("status", message=f"{engine.label} will apply to the next AI request.")
