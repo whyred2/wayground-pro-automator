@@ -49,14 +49,14 @@
 
 ### What's New in v4.1
 
-- **Experimental Linux and macOS support** — Added native browser discovery, user-data locations, platform-aware desktop controls and a shared native build script. Windows behavior is retained. Native Linux/macOS validation is pending; see [platform setup and limitations](docs/platform-support.md).
+- **Experimental Linux and macOS support** — Added native browser discovery, user-data locations, platform-aware desktop controls and a shared native build script. Native Windows, Linux x86_64 and macOS Intel/Apple Silicon builds pass automated tests and compiled-app checks; see [platform setup and limitations](docs/platform-support.md).
 - **Personal API settings in the UI** — Enter an OpenAI-compatible API base URL, API key and model in **Settings → AI engine → Personal API**. The key is masked by default, can be revealed, and is redacted from logs. Settings apply only after a successful check, including for the next AI request during a run. UI-entered API settings last until the app closes; use `.env` to retain them across restarts.
 - **GPT-6 request compatibility** — Uses `max_completion_tokens` with room for reasoning and omits custom temperature. Explicit API rejections trigger bounded retries to find supported token-limit and temperature parameters. Successful capabilities are reused for the same URL and model by both the connection check and solver.
 - **Verified API connection checks** — A provider must return the correct JSON answer to a test question. Empty, malformed, wrong or truncated responses fail the check and leave the previous API settings active.
 - **Automatic answer-explanation handling** — Uses **Next question** inside Wayground's explanation panel, including clickable `div` controls and English, Russian and Ukrainian labels. Waits for the panel to close before reading the next question and respects pause and Stop.
 - **Standalone HTTPS fix** — The Windows build script includes the SSL runtime's required PEM resource, fixing `[Errno 2] No such file or directory` during API-client initialization. The executable smoke check now verifies API-client initialization too.
 
-Full release notes: [v4.1](docs/releases/v4.1.md). The v4.1 executable has not been built yet.
+Full release notes: [v4.1](docs/releases/v4.1.md). Native v4.1 downloads are available for Windows, Linux x86_64 and macOS Intel/Apple Silicon.
 
 ### What's New in v4.0
 
@@ -152,7 +152,7 @@ These screenshots show the actual desktop windows with demonstration data, not a
 - **Hybrid Answer Engine** — Retrieves explicit Wayground API keys, checks public quiz candidates against the game, and supports captured network responses, optional Quizit Standard, and CheatNetwork fallback. AI can solve missing questions when enabled.
 - **Separate Question Records** — Repeated wording and image variants keep their own answers. IDs and visible option sets distinguish variants without merging their keys.
 - **Unresolved Questions Stop Automation** — If no complete answer is available, the current question is left unsubmitted with an explanation.
-- **Desktop and console operation** — The desktop UI connects to a dedicated Edge/Chrome/Chromium profile. Windows is verified; Linux and macOS have experimental source support. The console menu retains attach and standalone-browser modes.
+- **Desktop and console operation** — The desktop UI connects to a dedicated Edge/Chrome/Chromium profile. Windows is verified; Linux and macOS have experimental native builds. The console menu retains attach and standalone-browser modes.
 - **Variable answer timing** — The desktop **Min delay** defaults to 10 seconds, adds question-length timing and ±30% variation, and never falls below the selected minimum. Set it to **0** to skip automatic waiting; **Answer now** submits immediately.
 - **Intentional errors** — Set the limit in Settings or use `--wrong N` in the console. Desktop mistakes use verified keys and available alternatives; lowering the limit to zero preserves past mistakes and cancels pending ones.
 - **Native desktop controls** — Startup, live panel, compact strip and themed Settings share rounded outlines, readable answer text, pause/resume, Boss key and on-top controls. Accuracy percentages come from Wayground results.
@@ -313,7 +313,7 @@ Native UI interaction checks run offline with the other Python tests. For full a
 
 To build the windowed executable on Windows, install PyInstaller in the same Python environment as the requirements, then run `python scripts/build_windows.py`. The file is written to `dist/<version>/WaygroundAutomator.exe`. This build isolates DLL lookup from unrelated tools on PATH; `--console` produces a diagnostic build under `scratch/gui-debug`.
 
-For native Linux/macOS build preparation, use `python scripts/build_desktop.py --dry-run` on that OS. See [platform support](docs/platform-support.md) for build dependencies, `.app` output, shortcut limitations and the manual CI checks. Each OS requires its own native build; no v4.1 binaries have been produced.
+For native Linux/macOS builds, use `python scripts/build_desktop.py` on that OS; `--dry-run` previews the command. See [platform support](docs/platform-support.md) for build dependencies, `.app` output, shortcut limitations and CI checks. The **Native desktop builds** workflow produces tested downloads for Windows, Linux x86_64 and macOS Intel/Apple Silicon.
 
 ---
 
@@ -342,14 +342,14 @@ For native Linux/macOS build preparation, use `python scripts/build_desktop.py -
 
 ### Что нового в v4.1
 
-- **Экспериментальная поддержка Linux и macOS** — Добавлены поиск браузера, системные каталоги данных, адаптация оконного управления и общий сценарий нативной сборки. Поведение Windows сохранено. Проверка на настоящих Linux/macOS ещё требуется; см. [настройку платформ и ограничения](docs/platform-support.md).
+- **Экспериментальная поддержка Linux и macOS** — Добавлены поиск браузера, системные каталоги данных, адаптация оконного управления и общий сценарий нативной сборки. Нативные сборки Windows, Linux x86_64 и macOS Intel/Apple Silicon проходят автоматические тесты и проверки собранного приложения; см. [настройку платформ и ограничения](docs/platform-support.md).
 - **Свой API через интерфейс** — В **Settings → AI engine → Personal API** можно указать URL OpenAI-совместимого API, ключ и модель. Ключ скрыт по умолчанию, доступен для просмотра и удаляется из логов. Параметры применяются после успешной проверки, в том числе к следующему AI-запросу во время работы. Ввод через UI действует до закрытия программы; для сохранения между запусками используйте `.env`.
 - **Совместимость запросов с GPT-6** — Используется `max_completion_tokens` с запасом на рассуждения, без пользовательской температуры. При явном отказе API выполняется ограниченный подбор поддерживаемых параметров лимита токенов и температуры. Результат запоминается для этого URL и модели и используется проверкой подключения и решателем.
 - **Проверка реального ответа API** — Провайдер должен вернуть правильный JSON-ответ на тестовый вопрос. Пустой, некорректный, неверный или обрезанный ответ не проходит проверку; прежние параметры API сохраняются.
 - **Автоматический переход после объяснения** — Программа нажимает **Следующий вопрос** внутри панели объяснения Wayground, включая кликабельные `div` и подписи на английском, русском и украинском. Следующий вопрос считывается после закрытия панели; пауза и Stop продолжают работать.
 - **Исправление HTTPS в самостоятельной сборке** — Скрипт сборки Windows включает обязательный PEM-файл SSL runtime, устраняя `[Errno 2] No such file or directory` при создании API-клиента. Встроенная проверка `.exe` теперь проверяет и создание API-клиента.
 
-Полное описание релиза: [v4.1](docs/releases/v4.1.md). Исполняемый файл версии 4.1 пока не собран.
+Полное описание релиза: [v4.1](docs/releases/v4.1.md). Собраны файлы v4.1 для Windows, Linux x86_64 и macOS Intel/Apple Silicon.
 
 ### Что нового в v4.0
 
@@ -500,7 +500,7 @@ cp .env.example .env
 
 ### Быстрый старт
 
-Для Linux и macOS доступны [инструкция запуска из исходников и ограничения](docs/platform-support.md). В этих системах Boss key работает, пока приложение в фокусе; восстановление доступно через трей или панель задач/Dock.
+Для Linux и macOS доступны [инструкция запуска и ограничения](docs/platform-support.md). В этих системах Boss key работает, пока приложение в фокусе; восстановление доступно через трей или панель задач/Dock.
 
 Откройте оконный интерфейс:
 
@@ -613,7 +613,7 @@ node --test tests/test_gateway.mjs
 
 Для сборки в Windows установите PyInstaller в окружение с зависимостями проекта и выполните `python scripts/build_windows.py`. Результат сохраняется в `dist/<version>/WaygroundAutomator.exe`; `--console` создаёт диагностическую сборку в `scratch/gui-debug`.
 
-Для подготовки нативной сборки Linux/macOS используйте `python scripts/build_desktop.py --dry-run` в соответствующей ОС. Команда только показывает параметры. Зависимости, формат `.app`, ограничения горячих клавиш и ручные проверки CI описаны в [документации платформ](docs/platform-support.md). Бинарники v4.1 пока не собирались.
+Для нативной сборки Linux/macOS используйте `python scripts/build_desktop.py` в соответствующей ОС; `--dry-run` только показывает параметры. Зависимости, формат `.app`, ограничения горячих клавиш и проверки CI описаны в [документации платформ](docs/platform-support.md). Workflow **Native desktop builds** создаёт проверенные файлы Windows, Linux x86_64 и macOS Intel/Apple Silicon.
 
 <p align="center">
   <sub>Built with <a href="https://playwright.dev/python/">Playwright</a> · Python 3.10+</sub>

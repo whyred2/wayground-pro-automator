@@ -4,11 +4,20 @@ Version 4.1 adds platform-aware browser discovery, persistent directories, windo
 
 | Platform | Current validation | Native build output |
 | --- | --- | --- |
-| Windows | Source tests and local Edge integration verified | `dist/4.1/WaygroundAutomator.exe` |
-| Linux | Platform branches tested on Windows; native validation pending | `dist/4.1/linux-<architecture>/WaygroundAutomator` |
-| macOS | Platform branches tested on Windows; native validation pending | `dist/4.1/macos-<architecture>/WaygroundAutomator.app` |
+| Windows x86_64 | 342 native tests, 45 compiled-app checks; 15 local Edge checks | `.exe` |
+| Linux x86_64 | 342 native tests and 45 compiled-app checks using XCB under Xvfb on Ubuntu 24.04 | `.tar.gz` containing an executable |
+| macOS x86_64 | 342 native tests and 45 compiled-app checks on an Intel runner | `.zip` containing an `.app` |
+| macOS arm64 | 342 native tests and 45 compiled-app checks on an Apple Silicon runner | `.zip` containing an `.app` |
 
-Linux and macOS support is experimental until the native checks pass. No v4.1 binaries have been built. macOS signing and notarization are not configured, and builds target the host architecture rather than a universal binary.
+Linux and macOS support remains experimental: the automated checks do not cover every desktop environment or a live account session. Native v4.1 binaries have been built and checked in GitHub Actions. macOS bundles are ad-hoc signed; Developer ID signing and notarization are not configured. Intel and Apple Silicon downloads are separate.
+
+## Using the downloads
+
+- **Windows:** open `WaygroundAutomator-v4.1-windows-x86_64.exe`.
+- **Linux:** extract `WaygroundAutomator-v4.1-linux-x86_64.tar.gz` and run `./WaygroundAutomator` in a graphical desktop. The archive preserves executable permissions. This build targets Ubuntu 24.04; older distributions may require a native build. Qt's system libraries and an installed browser are required.
+- **macOS:** extract the ZIP for your processor, move `WaygroundAutomator.app` to Applications and open it. The app is not notarized; macOS may require an explicit allowance in **System Settings → Privacy & Security**.
+
+An installed Edge, Chrome or Chromium browser is required for the desktop connector on every platform. Python does not need to be installed to use the packaged app.
 
 ## Running from source
 
@@ -68,3 +77,5 @@ python scripts/build_desktop.py --dry-run
 When a build is wanted, use `python scripts/build_desktop.py` on the target OS. PyInstaller [does not cross-compile between operating systems](https://pyinstaller.org/en/stable/). Windows keeps its `.exe`, icon, version metadata and isolated DLL lookup; Linux produces a native executable; macOS produces an `.app` bundle. Pillow is included in the build requirements for macOS icon conversion. `--console` creates a diagnostic executable and `--distpath` overrides the output directory. The existing Windows entry point, `python scripts/build_windows.py`, remains available.
 
 The **Desktop platform checks** GitHub Actions workflow is manual (`workflow_dispatch`). It installs dependencies and a test browser, runs the unit/UI suite, checks desktop startup and runs local browser fixtures on Windows, Ubuntu and macOS. It does not build or publish binaries.
+
+The **Native desktop builds** workflow runs on `codex/build-v*` branch pushes or manually. It runs the native test suite, builds with Python 3.12, checks the compiled app and uploads downloads for Windows x86_64, Ubuntu 24.04 x86_64 and macOS Intel/Apple Silicon. Artifacts are retained for 14 days; this workflow does not create a GitHub Release.
