@@ -2,6 +2,8 @@
 
 This document outlines the guidelines and steps to help you get started.
 
+See the [development guide](docs/development.md) for the project structure, test commands and native build instructions.
+
 ## 🛠️ How to Report a Bug or Suggest a Feature
 
 Before creating a new Issue, please follow these steps:
